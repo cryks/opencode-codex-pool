@@ -540,6 +540,165 @@ describe("createFetch", () => {
     });
   });
 
+  test("keeps 5h windows more conservative than 7d windows at the same progress", async () => {
+    store.upsert(row("fast-window-5h", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 43,
+              reset_after_seconds: 9_000,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("allows 7d windows to enable fast-mode with less slack at the same progress", async () => {
+    store.upsert(row("fast-window-7d", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 43,
+              reset_after_seconds: 302_400,
+              limit_window_seconds: 604_800,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
+  test("relaxes the 5h threshold as the window approaches reset", async () => {
+    store.upsert(row("fast-window-late", 0));
+
+    const hits: Hit[] = [];
+    let usageHits = 0;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 42 : 82,
+              reset_after_seconds: usageHits === 1 ? 9_000 : 1_800,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const first = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(first.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+
+    Date.now = () => base + 60_001;
+    hits.length = 0;
+
+    const second = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(second.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
   test("shows fast-mode enabled in the account switch toast", async () => {
     store.upsert(row("fast-toast", 0));
 
@@ -597,7 +756,7 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 79 : 80,
+              used_percent: usageHits === 1 ? 79 : 82,
               reset_after_seconds: usageHits === 1 ? 900 : 1_000,
               limit_window_seconds: 9_000,
             },
@@ -662,7 +821,7 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 80 : 79,
+              used_percent: usageHits === 1 ? 82 : 79,
               reset_after_seconds: usageHits === 1 ? 1_000 : 900,
               limit_window_seconds: 9_000,
             },
@@ -727,7 +886,7 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 79 : 80,
+              used_percent: usageHits === 1 ? 79 : 82,
               reset_after_seconds: usageHits === 1 ? 900 : 1_000,
               limit_window_seconds: 9_000,
             },
@@ -778,7 +937,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("skips priority injection when fresh quota delta is below threshold", async () => {
+  test("skips priority injection when fresh quota falls below the weighted threshold", async () => {
     store.upsert(row("fast-off", 0));
 
     const hits: Hit[] = [];
@@ -791,7 +950,7 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 80,
+              used_percent: 84,
               reset_after_seconds: 1_000,
               limit_window_seconds: 9_000,
             },
@@ -948,8 +1107,8 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 80,
-              reset_after_seconds: 1_000,
+              used_percent: 84,
+              reset_after_seconds: 1_100,
               limit_window_seconds: 9_000,
             },
           },
@@ -1052,7 +1211,7 @@ describe("createFetch", () => {
             {
               rate_limit: {
                 primary_window: {
-                  used_percent: 80,
+                  used_percent: 84,
                   reset_after_seconds: 1_000,
                   limit_window_seconds: 9_000,
                 },

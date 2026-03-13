@@ -55,6 +55,11 @@ interface RankResult {
 }
 
 const decoder = new TextDecoder();
+const FAST_WINDOW_BASE = 18_000;
+const FAST_WINDOW_CEIL = 604_800;
+const FAST_START_DROP = 0.2;
+const FAST_END_SHORT = 0.7;
+const FAST_END_LONG = 0.2;
 
 function cacheKey(body: ArrayBuffer | null): string | undefined {
   if (!body) return undefined;
@@ -71,6 +76,12 @@ interface Window {
   used_percent?: number;
   reset_after_seconds?: number;
   limit_window_seconds?: number;
+}
+
+interface ReadyWindow {
+  used_percent: number;
+  reset_after_seconds: number;
+  limit_window_seconds: number;
 }
 
 interface Limit {
@@ -101,6 +112,10 @@ interface JsonBody {
 const FAST_DELTA = 0.1;
 const usageCache = new Map<string, UsageHit>();
 const loadingUsage = new Map<string, Promise<Usage | null>>();
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
 function weight(plan?: string) {
   const key = plan?.toLowerCase();
@@ -322,7 +337,7 @@ function blocked(limit?: Limit) {
   return limit.limit_reached === true;
 }
 
-function readyWindow(win?: Window) {
+function readyWindow(win?: Window): ReadyWindow | null | undefined {
   if (!win) return undefined;
   const used = win.used_percent;
   const after = win.reset_after_seconds;
@@ -333,20 +348,52 @@ function readyWindow(win?: Window) {
   if (!Number.isFinite(after) || after < 0) return null;
   if (typeof span !== "number") return null;
   if (!Number.isFinite(span) || span <= 0) return null;
-  return win;
+  return {
+    used_percent: used,
+    reset_after_seconds: after,
+    limit_window_seconds: span,
+  };
+}
+
+function fastSpan(win: ReadyWindow) {
+  const span = win.limit_window_seconds;
+  if (span <= FAST_WINDOW_BASE) return 0;
+
+  const base = Math.log(span / FAST_WINDOW_BASE);
+  const ceil = Math.log(FAST_WINDOW_CEIL / FAST_WINDOW_BASE);
+  return ceil > 0 ? clamp(base / ceil, 0, 1) : 0;
+}
+
+function fastNeed(win?: Window) {
+  const item = readyWindow(win);
+  if (item === undefined) return undefined;
+  if (item === null) return null;
+
+  const span = fastSpan(item);
+  const time = clamp(
+    item.reset_after_seconds / item.limit_window_seconds,
+    0,
+    1,
+  );
+  const start = FAST_DELTA * (1 - FAST_START_DROP * span);
+  const end =
+    FAST_DELTA * (FAST_END_SHORT - (FAST_END_SHORT - FAST_END_LONG) * span);
+  return end + (start - end) * time;
 }
 
 function delta(win?: Window) {
   const item = readyWindow(win);
   if (item === undefined) return undefined;
   if (item === null) return null;
-  const left = 1 - Math.min(Math.max(item.used_percent ?? 0, 0), 100) / 100;
-  const time = Math.min(
-    Math.max(item.reset_after_seconds ?? 0, 0) /
-      Math.max(item.limit_window_seconds ?? 1, 1),
+  const left = 1 - clamp(item.used_percent, 0, 100) / 100;
+  const time = clamp(
+    item.reset_after_seconds / item.limit_window_seconds,
+    0,
     1,
   );
-  return left - time;
+  const need = fastNeed(item);
+  if (typeof need !== "number") return null;
+  return left - time - need;
 }
 
 function limitDelta(limit?: Limit) {
@@ -368,7 +415,7 @@ function fast(usage: Usage) {
   if (list.includes(null)) return false;
   const values = list.filter((item): item is number => item !== undefined);
   if (values.length === 0) return false;
-  return Math.min(...values) >= FAST_DELTA;
+  return Math.min(...values) >= 0;
 }
 
 function object(value: unknown): value is Record<string, unknown> {
