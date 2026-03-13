@@ -4,6 +4,7 @@ export interface Account {
   email: string | null;
   chatgpt_account_id: string | null;
   label: string | null;
+  plan_type: string | null;
   priority: number;
   primary: number;
   access_token: string;

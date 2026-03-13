@@ -213,8 +213,10 @@ function refreshQuota(store: Store, row: Row) {
       headers.set("ChatGPT-Account-Id", account);
 
       const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
-      const value = res.ok ? score(((await res.json()) as Usage) ?? {}) : null;
+      const usage = res.ok ? (((await res.json()) as Usage) ?? {}) : null;
+      const value = usage ? score(usage) : null;
       if (value !== null) store.cacheQuota(row.id, value);
+      if (usage?.plan_type) store.updatePlanType(row.id, usage.plan_type);
       return value;
     } catch {
       return null;
@@ -448,12 +450,13 @@ export function createFetch(
           store.enable(row.id);
           store.clearCooldown(row.id);
           if (affinity.id !== row.id) {
-            const tag = row.primary === 1 ? "core" : "pool";
             const name = row.label || row.email || row.id.slice(0, 8);
+            const plan = row.plan_type ?? "unknown";
+            const role = row.primary === 1 ? "core" : "pool";
             void client.tui.showToast({
               body: {
                 title: "Codex Pool",
-                message: `${name} (${tag})`,
+                message: `Using ${name} — ${plan} (${role})`,
                 variant: "info",
                 duration: 3000,
               },

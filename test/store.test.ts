@@ -19,6 +19,7 @@ function row(
     email: `${id}@example.com`,
     chatgpt_account_id: `${id}-chat`,
     label: id,
+    plan_type: null,
     priority,
     primary: 0,
     access_token: `${id}-access`,

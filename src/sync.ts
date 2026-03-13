@@ -26,6 +26,7 @@ export async function bootstrap(store: Store, getAuth: () => Promise<Auth>) {
     chatgpt_account_id:
       meta.chatgpt_account_id ?? row?.chatgpt_account_id ?? null,
     label: row?.label ?? meta.email ?? null,
+    plan_type: row?.plan_type ?? null,
     priority: 0,
     primary: 1,
     access_token: auth.access,

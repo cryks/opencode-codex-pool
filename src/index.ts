@@ -29,6 +29,7 @@ function save(tokens: TokenSet, priority: number, primary: boolean) {
     chatgpt_account_id:
       meta.chatgpt_account_id ?? row?.chatgpt_account_id ?? null,
     label: row?.label ?? meta.email ?? null,
+    plan_type: row?.plan_type ?? null,
     priority,
     primary: primary ? 1 : 0,
     access_token: tokens.access_token,

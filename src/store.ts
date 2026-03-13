@@ -20,6 +20,7 @@ SELECT
   account.email,
   account.chatgpt_account_id,
   account.label,
+  account.plan_type,
   account.priority,
   account.primary_account AS "primary",
   account.access_token,
@@ -62,10 +63,17 @@ function setup(db: Database) {
       expires_at INTEGER NOT NULL,
       disabled_at INTEGER,
       last_error TEXT,
+      plan_type TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )
   `);
+
+  try {
+    db.run("ALTER TABLE account ADD COLUMN plan_type TEXT");
+  } catch {
+    // Column already exists in an existing database
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS cooldown (
@@ -130,6 +138,7 @@ export function open(path?: string) {
       id: string;
       label: string | null;
       last_error: string | null;
+      plan_type: string | null;
       primary: number;
       priority: number;
       refresh_token: string;
@@ -143,6 +152,7 @@ export function open(path?: string) {
       email,
       chatgpt_account_id,
       label,
+      plan_type,
       priority,
       primary_account,
       access_token,
@@ -158,6 +168,7 @@ export function open(path?: string) {
       $email,
       $chatgpt_account_id,
       $label,
+      $plan_type,
       $priority,
       $primary,
       $access_token,
@@ -173,6 +184,7 @@ export function open(path?: string) {
       email = excluded.email,
       chatgpt_account_id = excluded.chatgpt_account_id,
       label = excluded.label,
+      plan_type = excluded.plan_type,
       priority = excluded.priority,
       primary_account = excluded.primary_account,
       access_token = excluded.access_token,
@@ -341,6 +353,12 @@ export function open(path?: string) {
   const clearQuota = db.prepare<unknown, { account_id: string }>(
     "DELETE FROM quota_cache WHERE account_id = $account_id",
   );
+  const plan = db.prepare<
+    unknown,
+    { id: string; now: number; plan_type: string }
+  >(
+    "UPDATE account SET plan_type = $plan_type, updated_at = $now WHERE id = $id",
+  );
 
   const upsert = db.transaction((account: Account) => {
     const row = old.get({ id: account.id });
@@ -460,6 +478,10 @@ export function open(path?: string) {
 
     clearQuota(id: string) {
       return clearQuota.run({ account_id: id }).changes > 0;
+    },
+
+    updatePlanType(id: string, planType: string) {
+      return plan.run({ id, now: Date.now(), plan_type: planType }).changes > 0;
     },
 
     available() {
