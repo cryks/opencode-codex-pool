@@ -24,6 +24,16 @@ const pending = new Map<string, Promise<number | null>>();
 interface Affinity {
   id?: string;
   at: number;
+  fast?: boolean;
+}
+
+interface AttemptResult {
+  init: RequestInit | undefined;
+  fast: boolean;
+}
+
+function active(affinity: Affinity) {
+  return Boolean(affinity.id) && Date.now() - affinity.at < AFFINITY_MS;
 }
 
 type ScoreSource = "fresh" | "stale" | "missing";
@@ -207,6 +217,16 @@ function describe(scores: ScoreView[], reason: string, pick: string) {
     ...scores.map((item) => line(item, pick, nameWidth, planWidth)),
   ];
   return lines.join("\n");
+}
+
+function fastLine(fast: boolean) {
+  return `Fast-mode ${fast ? "enabled" : "disabled"}`;
+}
+
+function fastReason(fast: boolean) {
+  return fast
+    ? "fresh usage is ahead of time"
+    : "fresh usage fell below threshold";
 }
 
 function listed(scores: ScoreView[], item: ScoreView) {
@@ -476,17 +496,20 @@ function attempt(
   init: RequestInit | undefined,
   row: Row,
   parsed: JsonBody | undefined,
-) {
+) : AttemptResult {
   const url = rewrite(input).toString();
-  if (url !== CODEX_API_ENDPOINT) return init;
+  if (url !== CODEX_API_ENDPOINT) return { init, fast: false };
   const body = withPriority(parsed);
-  if (!body) return init;
+  if (!body) return { init, fast: false };
   const usage = freshUsage(row);
-  if (!usage || !fast(usage)) return init;
+  if (!usage || !fast(usage)) return { init, fast: false };
   return {
-    ...init,
-    body: new TextEncoder().encode(JSON.stringify(body)).buffer,
-  } satisfies RequestInit;
+    init: {
+      ...init,
+      body: new TextEncoder().encode(JSON.stringify(body)).buffer,
+    } satisfies RequestInit,
+    fast: true,
+  };
 }
 
 function pick(store: Store) {
@@ -714,11 +737,13 @@ export function createFetch(
           row = await renew(store, row, client);
         }
 
-        let res = await send(input, attempt(input, snap, row, parsed), row);
+        let used = attempt(input, snap, row, parsed);
+        let res = await send(input, used.init, row);
 
         if (res.status === 401) {
           row = await renew(store, row, client);
-          res = await send(input, attempt(input, snap, row, parsed), row);
+          used = attempt(input, snap, row, parsed);
+          res = await send(input, used.init, row);
         }
 
         if (res.status === 429) {
@@ -745,7 +770,8 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
-          if (affinity.id !== row.id) {
+          const sticky = active(affinity);
+          if (!sticky || affinity.id !== row.id) {
             const tier = plan(row);
             const scores = listed(
               ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
@@ -759,7 +785,20 @@ export function createFetch(
             void client.tui.showToast({
               body: {
                 title: "Codex Pool",
-                message: `Using ${name(row)} — ${tier} (${role(row)})\n${detail}`,
+                message:
+                  `Using ${name(row)} — ${tier} (${role(row)})\n` +
+                  `${fastLine(used.fast)}\n${detail}`,
+                variant: "info",
+                duration: 10_000,
+              },
+            });
+          } else if (affinity.fast !== undefined && affinity.fast !== used.fast) {
+            void client.tui.showToast({
+              body: {
+                title: "Codex Pool",
+                message:
+                  `${fastLine(used.fast)} — ${name(row)} (${role(row)})\n` +
+                  `Reason: ${fastReason(used.fast)}`,
                 variant: "info",
                 duration: 10_000,
               },
@@ -768,6 +807,7 @@ export function createFetch(
           if (session) {
             affinity.id = row.id;
             affinity.at = Date.now();
+            affinity.fast = used.fast;
           }
         }
 
