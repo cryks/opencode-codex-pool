@@ -38,12 +38,12 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 - Fast-mode is implemented as post-ranking request decoration inside `src/fetch.ts`; it does **not** change account ordering or sticky affinity.
 - The final outbound field is OpenAI's `service_tier`, even though upstream config and provider options may use `serviceTier`.
-- The feature only considers fresh usage data already warmed in the current fetch instance. The shared SQLite stale-cache fallback remains routing-only and must never enable fast-mode.
+- The feature uses the selected account's in-memory usage cache. Fresh usage is authoritative for 60 seconds; after that, stale in-memory usage may still enable fast-mode for the current attempt while a background refresh is started. The shared SQLite score cache remains routing-only.
 - The trigger is conservative: for every complete window in every rate limit, compute `remaining_capacity = 1 - used_percent / 100` and `remaining_time = reset_after_seconds / limit_window_seconds`; enable fast-mode only when the minimum `remaining_capacity - remaining_time` is at least `0.1`.
 - If any considered limit is blocked (`allowed = false` or `limit_reached = true`) or any present window is incomplete for fast-mode math, fast-mode stays off.
 - Caller-provided `service_tier` or `serviceTier` takes precedence and must not be overridden by the plugin.
 - Request bodies remain immutably snapshotted before retries. Each 401 retry or 429 failover rebuilds an attempt-local JSON body so `service_tier: "priority"` never leaks across accounts or attempts.
-- The account-selection toast must include `Fast-mode enabled` or `Fast-mode disabled` for the winning attempt, identify the selected account with a `>` prefix in the `Account:`/`Accounts:` list, and a sticky session must emit a separate toast when fast-mode flips without an account switch.
+- The account-selection toast must include `Fast-mode enabled` or `Fast-mode disabled` for the current attempt, identify the selected account with a `>` prefix in the `Account:`/`Accounts:` list, and fire immediately before the outbound prompt request for that account. A sticky session must still emit a separate toast when fast-mode flips without an account switch.
 
 ### Sticky affinity
 
@@ -56,7 +56,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
 - When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
 - Request bodies are snapshotted before retries so failover and refresh retries can safely replay the same payload.
-- When the selected account changes, the success toast includes a compact score summary for the accounts that participated in the selection decision, marks the chosen account with a `>` prefix in the `Account:`/`Accounts:` list, pads account and plan columns for readability, includes a short reason string (for example, higher score, quota cache warming, or failover after a `429`), and shows whether fast-mode was enabled for that winning attempt.
+- When the selected account changes, the pre-request selection toast includes a compact score summary for the accounts that participated in the selection decision, marks the chosen account with a `>` prefix in the `Account:`/`Accounts:` list, pads account and plan columns for readability, includes a short reason string (for example, higher score, quota cache warming, or failover after a `429`), and shows whether fast-mode is enabled for that attempt.
 
 ### Coexistence with built-in CodexAuthPlugin
 
