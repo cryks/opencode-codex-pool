@@ -1,0 +1,58 @@
+export interface Account {
+  id: string;
+  subject: string | null;
+  email: string | null;
+  chatgpt_account_id: string | null;
+  label: string | null;
+  priority: number;
+  primary: number;
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+  disabled_at: number | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface Cooldown {
+  account_id: string;
+  until_at: number;
+  retry_after_ms: number | null;
+  status: number;
+  reason: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface Lock {
+  key: string;
+  owner: string;
+  until_at: number;
+  updated_at: number;
+}
+
+export interface TokenSet {
+  access_token: string;
+  refresh_token: string;
+  expires_in?: number;
+  id_token?: string;
+}
+
+export interface AccountMeta {
+  subject?: string;
+  email?: string;
+  chatgpt_account_id?: string;
+}
+
+export const SENTINEL_SHADOW_PROVIDER = "openai-codex-pool-shadow";
+export const OAUTH_DUMMY_KEY = "OAUTH_DUMMY_KEY";
+
+export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export const CODEX_ISSUER = "https://auth.openai.com";
+export const CODEX_API_ENDPOINT =
+  "https://chatgpt.com/backend-api/codex/responses";
+export const CODEX_OAUTH_PORT = 1455;
+
+export const DEFAULT_COOLDOWN_MS = 60_000;
+export const REFRESH_LEASE_MS = 30_000;
