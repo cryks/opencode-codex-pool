@@ -62,7 +62,7 @@ src/
 
 ## Agent rules
 
-- When an agent changes the program's specification — including behavior, architecture, design decisions, routing logic, constants, file structure, or any other documented contract — the agent MUST update this AGENTS.md to reflect the change before considering the task complete.
+- When an agent changes the program's specification — including behavior, architecture, design decisions, routing logic, constants, file structure, or any other documented contract — the agent MUST update both this AGENTS.md and README.md to reflect the change before considering the task complete.
 
 ## Style guide
 
