@@ -22,7 +22,8 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - Routing compares `core` against the highest-priority currently available `pool` account only. Pool accounts keep their internal priority order; the strategy only decides whether `core` stays ahead of the pool group or moves behind it.
 - The quota signal comes from `https://chatgpt.com/backend-api/wham/usage`, using the account's bearer token plus `ChatGPT-Account-Id`.
 - Each account's burn score is weighted by plan type: Pro = 10, Plus/Team/default = 1. The weight is derived from the `plan_type` field in the usage API response.
-- Per-window score is `(plan_weight * (1 - used_percent / 100)) / pace`. When `limit_window_seconds` is available, `pace = max(reset_after_seconds / limit_window_seconds, 0.000001)` normalises for elapsed time within the window; otherwise `pace = reset_after_seconds`. Higher score means "this account has more weighted remaining capacity, so burn it first."
+- Per-window score is `(plan_weight * (1 - used_percent / 100)) / (pace * conservation)`. When `limit_window_seconds` is available, `pace = max(reset_after_seconds / limit_window_seconds, 0.000001)` normalises for elapsed time within the window; otherwise `pace = reset_after_seconds` and conservation is skipped to avoid double-counting. Higher score means "this account has more weighted remaining capacity, so burn it first."
+- The conservation factor differentiates tactical (short-recovery) windows from strategic (long-recovery) windows: `conservation = max(1, min(CONSERVATION_CAP, 1 + ln(reset_after_seconds / CONSERVATION_REF)))`. Windows with recovery under 4 hours (`CONSERVATION_REF = 14_400`) receive no dampening. Longer recovery horizons are dampened logarithmically up to a cap derived from a 2-week ceiling (`CONSERVATION_HORIZON = 1_209_600`). This makes the router conserve long-window quota (e.g. 7-day limits) while freely burning short-window quota (e.g. 5-hour limits). Near-reset long windows (e.g. a 7-day window with 30 minutes left) receive no dampening, enabling aggressive use-it-or-lose-it burn.
 - If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
 - When both primary and secondary windows exist within a single rate limit, the **minimum** (most conservative) window score is used. When additional rate limits exist, the minimum across all limits is taken. A zero in any limit forces the overall score to 0.
 - Quota scores are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
@@ -38,7 +39,8 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - To preserve provider-side prompt cache warmth, the routing layer tracks which account last handled a successful response (`res.ok`) **per session** and prefers that account for subsequent requests within a 5-minute window (`AFFINITY_MS = 300_000`), aligned with OpenAI's in-memory prompt cache retention.
 - The session identity is derived from the `prompt_cache_key` field in the JSON request body (set to `sessionID` by opencode). Requests without `prompt_cache_key` receive no affinity and always use standard score-based routing.
 - Different sessions maintain independent affinity: Session A may be sticky to core while Session B is sticky to pool. This ensures that cross-session routing remains quota-aware and distributes load across accounts.
-- The sticky account is only abandoned when: (a) the alternative's quota score exceeds the sticky account's score by more than 20% (`SWITCH_MARGIN = 0.2`), (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
+- The sticky account is only abandoned when: (a) the alternative's quota score exceeds the sticky account's score by more than the adaptive margin, (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
+- The adaptive margin is `SWITCH_MARGIN * (0.5 + 0.5 * min(a, b) / max(a, b))` where `SWITCH_MARGIN = 0.2`. When scores are close (both accounts similarly healthy), the margin approaches the full 20%. When scores diverge (one account is conservation-dampened), the margin shrinks toward 10%, making the router more willing to switch away from a strategically constrained account.
 - Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
 - When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
 - Request bodies are snapshotted before retries so failover and refresh retries can safely replay the same payload.
@@ -108,8 +110,14 @@ For source-based local development, pointing at `src/index.ts` still works becau
 - `SENTINEL_SHADOW_PROVIDER`: `openai-codex-pool-shadow` (inert auth.json record for additional accounts)
 - `OAUTH_DUMMY_KEY`: `OAUTH_DUMMY_KEY` (dummy key returned by the loader alongside the custom fetch)
 - `REFRESH_LEASE_MS`: `30_000` (SQLite refresh lock lease shared across processes)
+- `CONSERVATION_REF`: `14_400` (4 hours — tactical/strategic boundary)
+- `CONSERVATION_HORIZON`: `1_209_600` (2 weeks — conservation cap ceiling)
 - Stale quota fallback horizon: `86_400_000` ms (24 hours)
 - DB default path: `~/.local/share/opencode/codex-pool.db`
+
+## Future work
+
+- Pool accounts currently keep their internal priority order and only the highest-priority pool account participates in the core-vs-pool comparison (`rank()` compares `core` against the first non-primary row only). When multiple pool accounts are supported, they should be re-ranked by quota score so the most available pool account is always the one competing against core. This would make conservation-aware scoring effective across the full fleet, not just the core/pool boundary.
 
 ## Upstream references
 

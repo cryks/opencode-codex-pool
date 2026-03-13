@@ -1196,4 +1196,214 @@ describe("createFetch", () => {
       "Bearer pool-ind-access",
     ]);
   });
+
+  test("conservation dampens long-window account in favor of short-window account", async () => {
+    store.upsert(row("core-long", 0, { primary: 1 }));
+    store.setPrimary("core-long");
+    store.upsert(row("pool-short", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const hdr = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (hdr === "Bearer core-long-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 518_400,
+                limit_window_seconds: 604_800,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(hdr ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-long-access",
+      "Bearer pool-short-access",
+    ]);
+  });
+
+  test("conservation allows aggressive burn of near-reset long window", async () => {
+    store.upsert(row("core-expiring", 0, { primary: 1 }));
+    store.setPrimary("core-expiring");
+    store.upsert(row("pool-moderate", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const hdr = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (hdr === "Bearer core-expiring-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 40,
+                reset_after_seconds: 1_800,
+                limit_window_seconds: 604_800,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 40,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(hdr ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-expiring-access",
+      "Bearer core-expiring-access",
+    ]);
+  });
+
+  test("conservation factor is capped at horizon", async () => {
+    store.upsert(row("core-extreme", 0, { primary: 1 }));
+    store.setPrimary("core-extreme");
+    store.upsert(row("pool-normal", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const hdr = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (hdr === "Bearer core-extreme-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                reset_after_seconds: 2_592_000,
+                limit_window_seconds: 2_592_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(hdr ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-extreme-access",
+      "Bearer pool-normal-access",
+    ]);
+  });
+
+  test("adaptive switch margin breaks affinity sooner when scores diverge", async () => {
+    store.upsert(row("core-am", 0, { primary: 1 }));
+    store.setPrimary("core-am");
+    store.upsert(row("pool-am", 1));
+
+    store.cacheQuota("core-am", 0.1);
+    store.cacheQuota("pool-am", 0.12);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const hdr = new Headers(init?.headers).get("authorization");
+      hits.push(hdr ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const body = JSON.stringify({ prompt_cache_key: "ses-am" });
+
+    // pool wins first (0.12 > 0.10), affinity = pool
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // flip: core 0.12, pool 0.10
+    // fixed 0.2 margin: 0.12 > 0.10 * 1.2 = 0.12 → false (not strict >)
+    // adaptive margin: balance = 0.833, margin ≈ 0.183 → 0.12 > 0.1183 → true
+    store.cacheQuota("core-am", 0.12);
+    store.cacheQuota("pool-am", 0.1);
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer pool-am-access",
+      "Bearer core-am-access",
+    ]);
+  });
 });

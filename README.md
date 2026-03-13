@@ -15,7 +15,7 @@
 
 The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in Codex plugin still runs first, so model filtering and Codex-specific behavior stay intact. This plugin then supplies a dummy OAuth API key plus a replacement fetch layer, while leaving the rest of the Codex integration alone.
 
-At runtime, the router compares the primary account against the highest-priority available pool account. Each side gets a quota score derived from the ChatGPT usage endpoint. Higher score means the account has more weighted capacity worth spending now, so it goes first. If a request gets a `429`, that account is placed on cooldown and the next account is tried. If a request gets a `401`, the plugin refreshes the token and retries once.
+At runtime, the router compares the primary account against the highest-priority available pool account. Each side gets a quota score derived from the ChatGPT usage endpoint. Higher score means the account has more weighted capacity worth spending now, so it goes first. Scores are adjusted by a conservation factor that differentiates tactical windows (e.g. 5-hour limits that recover quickly) from strategic windows (e.g. 7-day limits where early exhaustion is catastrophic). Long-recovery windows are dampened logarithmically so the router conserves them, while near-reset windows of any duration are burned aggressively to avoid waste. If a request gets a `429`, that account is placed on cooldown and the next account is tried. If a request gets a `401`, the plugin refreshes the token and retries once.
 
 When a request body contains `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for a short time. It only abandons that affinity when the alternative account is meaningfully better, blocked, or no longer available.
 
@@ -101,7 +101,7 @@ test/
 
 - The primary account is special: it is mirrored back into opencode's `openai` auth so Codex-specific behavior remains enabled.
 - Different ChatGPT accounts do not share the same server-side prompt cache, so switching accounts mid-session can increase latency.
-- Quota ordering is conservative: blocked limits and the lowest available rate-limit window win.
+- Quota ordering is conservative: blocked limits and the lowest available rate-limit window win. Long-recovery windows (over 4 hours until reset) receive logarithmic dampening capped at a 2-week horizon, making the router prefer accounts with shorter recovery times when capacity is otherwise similar.
 - Failed usage fetches do not write a negative cache entry; routing falls back to existing order and retries warming later.
 - Request bodies are snapshotted before retries so failover and token refresh can replay the same payload safely.
 - If every available account is rate limited, the last `429` response is returned.

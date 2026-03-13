@@ -7,6 +7,8 @@ import {
   CODEX_API_ENDPOINT,
   CODEX_USAGE_ENDPOINT,
   REFRESH_LEASE_MS,
+  CONSERVATION_REF,
+  CONSERVATION_HORIZON,
 } from "./types";
 
 type Client = PluginInput["client"];
@@ -15,6 +17,7 @@ const QUOTA_CACHE_MS = 60_000;
 const STALE_QUOTA_MS = 86_400_000;
 const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
+const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
 const pending = new Map<string, Promise<number | null>>();
 
 interface Affinity {
@@ -152,7 +155,11 @@ function windowScore(win: Window | undefined, plan: number) {
   const span = win.limit_window_seconds;
   if (typeof span === "number" && Number.isFinite(span) && span > 0) {
     const pace = Math.max(secs / span, 0.000001);
-    return (plan * left) / pace;
+    const cons = Math.max(
+      1,
+      Math.min(CONSERVATION_CAP, 1 + Math.log(secs / CONSERVATION_REF)),
+    );
+    return (plan * left) / (pace * cons);
   }
 
   return (plan * left) / secs;
@@ -267,11 +274,13 @@ function rank(store: Store, rows: Row[], affinity: Affinity) {
   const rest = rows.filter((item) => item.id !== core.id);
 
   if (affinity.id && Date.now() - affinity.at < AFFINITY_MS) {
+    const hi = Math.max(a, b, 0.001);
+    const margin = SWITCH_MARGIN * (0.5 + 0.5 * Math.min(a, b) / hi);
     if (affinity.id === core.id && a > 0) {
-      return b > a * (1 + SWITCH_MARGIN) ? [...rest, core] : [core, ...rest];
+      return b > a * (1 + margin) ? [...rest, core] : [core, ...rest];
     }
     if (affinity.id === pool.id && b > 0) {
-      return a > b * (1 + SWITCH_MARGIN) ? [core, ...rest] : [...rest, core];
+      return a > b * (1 + margin) ? [core, ...rest] : [...rest, core];
     }
   }
 
