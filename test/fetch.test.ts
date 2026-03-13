@@ -5,7 +5,11 @@ import type { Auth } from "@opencode-ai/sdk";
 import { createFetch } from "../src/fetch";
 import { open } from "../src/store";
 import type { Store } from "../src/store";
-import { CODEX_API_ENDPOINT, REFRESH_LEASE_MS } from "../src/types";
+import {
+  CODEX_API_ENDPOINT,
+  CODEX_USAGE_ENDPOINT,
+  REFRESH_LEASE_MS,
+} from "../src/types";
 import type { Account } from "../src/types";
 
 interface Hit {
@@ -46,6 +50,30 @@ function auth(): Auth {
     refresh: "r",
     expires: Date.now() + 3_600_000,
   };
+}
+
+function usage(body: Record<string, unknown>): Response;
+function usage(used: number, reset: number): Response;
+function usage(input: number | Record<string, unknown>, reset?: number) {
+  const body =
+    typeof input === "number"
+      ? {
+          rate_limit: {
+            primary_window: {
+              used_percent: input,
+              reset_after_seconds: reset,
+            },
+          },
+        }
+      : input;
+
+  return new Response(
+    JSON.stringify(body),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
 }
 
 function stub() {
@@ -340,6 +368,598 @@ describe("createFetch", () => {
     expect(hits.map((item) => item.auth)).toEqual([
       "Bearer a-access",
       "Bearer b-access",
+    ]);
+  });
+
+  test("prefers pool before core when pool has more quota to burn before reset", async () => {
+    store.upsert(row("core-fast", 0, { primary: 1 }));
+    store.setPrimary("core-fast");
+    store.upsert(row("pool-fast", 1));
+    store.cacheQuota("core-fast", (100 - 80) / 7_200);
+    store.cacheQuota("pool-fast", (100 - 20) / 600);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect(hits).toEqual(["Bearer pool-fast-access"]);
+  });
+
+  test("keeps core before pool when core is more urgent to spend", async () => {
+    store.upsert(row("core-soon", 0, { primary: 1 }));
+    store.setPrimary("core-soon");
+    store.upsert(row("pool-later", 1));
+    store.cacheQuota("core-soon", (100 - 20) / 600);
+    store.cacheQuota("pool-later", (100 - 80) / 7_200);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect(hits).toEqual(["Bearer core-soon-access"]);
+  });
+
+  test("prefers pro pool over plus core when relative usage is equal", async () => {
+    store.upsert(row("core-plus", 0, { primary: 1 }));
+    store.setPrimary("core-plus");
+    store.upsert(row("pool-pro", 1));
+
+    let scans = 0;
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        if (auth === "Bearer core-plus-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "pro",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(scans).toBe(2);
+    expect(hits).toEqual([
+      "Bearer core-plus-access",
+      "Bearer pool-pro-access",
+    ]);
+  });
+
+  test("defaults unknown plan_type to weight 1", async () => {
+    store.upsert(row("core-unknown", 0, { primary: 1 }));
+    store.setPrimary("core-unknown");
+    store.upsert(row("pool-plus", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-unknown-access") {
+          return usage({
+            plan_type: "enterprise",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-unknown-access",
+      "Bearer core-unknown-access",
+    ]);
+  });
+
+  test("treats allowed false as unavailable", async () => {
+    store.upsert(row("core-blocked", 0, { primary: 1 }));
+    store.setPrimary("core-blocked");
+    store.upsert(row("pool-open", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-blocked-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              allowed: false,
+              primary_window: {
+                used_percent: 1,
+                reset_after_seconds: 60,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 90,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-blocked-access",
+      "Bearer pool-open-access",
+    ]);
+  });
+
+  test("treats limit_reached true as unavailable", async () => {
+    store.upsert(row("core-limit", 0, { primary: 1 }));
+    store.setPrimary("core-limit");
+    store.upsert(row("pool-ready", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-limit-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              limit_reached: true,
+              primary_window: {
+                used_percent: 10,
+                reset_after_seconds: 60,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 90,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-limit-access",
+      "Bearer pool-ready-access",
+    ]);
+  });
+
+  test("uses limit_window_seconds when reset_after_seconds is missing", async () => {
+    store.upsert(row("core-missing-reset", 0, { primary: 1 }));
+    store.setPrimary("core-missing-reset");
+    store.upsert(row("pool-missing-reset", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-missing-reset-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 80,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 20,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-missing-reset-access",
+      "Bearer pool-missing-reset-access",
+    ]);
+  });
+
+  test("uses the minimum score across primary and secondary windows", async () => {
+    store.upsert(row("core-two-window", 0, { primary: 1 }));
+    store.setPrimary("core-two-window");
+    store.upsert(row("pool-mid", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-two-window-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 5,
+                reset_after_seconds: 60,
+                limit_window_seconds: 18_000,
+              },
+              secondary_window: {
+                used_percent: 99,
+                reset_after_seconds: 600,
+                limit_window_seconds: 604_800,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-two-window-access",
+      "Bearer pool-mid-access",
+    ]);
+  });
+
+  test("uses the minimum score across additional rate limits", async () => {
+    store.upsert(row("core-additional", 0, { primary: 1 }));
+    store.setPrimary("core-additional");
+    store.upsert(row("pool-plain", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-additional-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 5,
+                reset_after_seconds: 60,
+                limit_window_seconds: 18_000,
+              },
+            },
+            additional_rate_limits: [
+              {
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 99,
+                    reset_after_seconds: 600,
+                    limit_window_seconds: 18_000,
+                  },
+                },
+              },
+            ],
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-additional-access",
+      "Bearer pool-plain-access",
+    ]);
+  });
+
+  test("cold quota cache keeps the current request on core and warms future ranking in the background", async () => {
+    store.upsert(row("core-cache", 0, { primary: 1 }));
+    store.setPrimary("core-cache");
+    store.upsert(row("pool-cache", 1));
+
+    let scans = 0;
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        if (auth === "Bearer core-cache-access") return usage(80, 7_200);
+        return usage(20, 600);
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    const first = await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(scans).toBe(2);
+    expect(hits).toEqual([
+      "Bearer core-cache-access",
+      "Bearer pool-cache-access",
+    ]);
+  });
+
+  test("refresh clears a stale quota cache and falls back to core until usage is rewarmed", async () => {
+    store.upsert(row("core-refresh", 0, { primary: 1 }));
+    store.setPrimary("core-refresh");
+    store.upsert(row("pool-refresh", 1));
+    store.cacheQuota("core-refresh", 1);
+    store.cacheQuota("pool-refresh", 0.1);
+
+    let scans = 0;
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        if (auth === "Bearer next-access") {
+          return usage(80, 7_200);
+        }
+
+        return new Response("unused", { status: 500 });
+      }
+
+      if (target === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: "next-access",
+            refresh_token: "next-refresh",
+            expires_in: 60,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      hits.push(auth ?? "");
+
+      if (auth === "Bearer core-refresh-access") {
+        return new Response("unauthorized", {
+          status: 401,
+          statusText: "Unauthorized",
+        });
+      }
+
+      if (auth === "Bearer next-access") {
+        return new Response("core-ok", { status: 200 });
+      }
+
+      return new Response("pool-ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    const first = await run("https://api.openai.com/v1/responses");
+    expect(store.quota("core-refresh", 60_000)).toBeUndefined();
+
+    const second = await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const third = await run("https://api.openai.com/v1/responses");
+
+    expect(first.status).toBe(200);
+    expect(await first.text()).toBe("core-ok");
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe("core-ok");
+    expect(third.status).toBe(200);
+    expect(await third.text()).toBe("pool-ok");
+    expect(scans).toBe(1);
+    expect(hits).toEqual([
+      "Bearer core-refresh-access",
+      "Bearer next-access",
+      "Bearer next-access",
+      "Bearer pool-refresh-access",
     ]);
   });
 

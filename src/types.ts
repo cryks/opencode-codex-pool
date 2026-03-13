@@ -52,6 +52,7 @@ export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_ISSUER = "https://auth.openai.com";
 export const CODEX_API_ENDPOINT =
   "https://chatgpt.com/backend-api/codex/responses";
+export const CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 export const CODEX_OAUTH_PORT = 1455;
 
 export const DEFAULT_COOLDOWN_MS = 60_000;

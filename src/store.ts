@@ -80,6 +80,14 @@ function setup(db: Database) {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS quota_cache (
+      account_id TEXT PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
+      score REAL NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS "lock" (
       key TEXT PRIMARY KEY,
       owner TEXT NOT NULL,
@@ -92,6 +100,9 @@ function setup(db: Database) {
     "CREATE INDEX IF NOT EXISTS account_priority_idx ON account(priority, disabled_at)",
   );
   db.run("CREATE INDEX IF NOT EXISTS cooldown_until_idx ON cooldown(until_at)");
+  db.run(
+    "CREATE INDEX IF NOT EXISTS quota_cache_updated_idx ON quota_cache(updated_at)",
+  );
 }
 
 export function open(path?: string) {
@@ -304,6 +315,32 @@ export function open(path?: string) {
   const release = db.prepare<unknown, { key: string; owner: string }>(
     'DELETE FROM "lock" WHERE key = $key AND owner = $owner',
   );
+  const quota = db.prepare<
+    { score: number },
+    { account_id: string; min_updated_at: number }
+  >(
+    "SELECT score FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
+  );
+  const cache = db.prepare<
+    unknown,
+    { account_id: string; score: number; updated_at: number }
+  >(`
+    INSERT INTO quota_cache (
+      account_id,
+      score,
+      updated_at
+    ) VALUES (
+      $account_id,
+      $score,
+      $updated_at
+    )
+    ON CONFLICT(account_id) DO UPDATE SET
+      score = excluded.score,
+      updated_at = excluded.updated_at
+  `);
+  const clearQuota = db.prepare<unknown, { account_id: string }>(
+    "DELETE FROM quota_cache WHERE account_id = $account_id",
+  );
 
   const upsert = db.transaction((account: Account) => {
     const row = old.get({ id: account.id });
@@ -404,6 +441,25 @@ export function open(path?: string) {
 
     clearExpired() {
       return sweep.run({ now: Date.now() }).changes;
+    },
+
+    quota(id: string, maxAgeMs: number) {
+      return quota.get({
+        account_id: id,
+        min_updated_at: Date.now() - maxAgeMs,
+      })?.score;
+    },
+
+    cacheQuota(id: string, score: number) {
+      return cache.run({
+        account_id: id,
+        score,
+        updated_at: Date.now(),
+      }).changes > 0;
+    },
+
+    clearQuota(id: string) {
+      return clearQuota.run({ account_id: id }).changes > 0;
     },
 
     available() {

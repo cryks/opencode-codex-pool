@@ -3,9 +3,45 @@ import type { PluginInput } from "@opencode-ai/plugin";
 
 import { refresh } from "./oauth";
 import type { Store } from "./store";
-import { CODEX_API_ENDPOINT, REFRESH_LEASE_MS } from "./types";
+import {
+  CODEX_API_ENDPOINT,
+  CODEX_USAGE_ENDPOINT,
+  REFRESH_LEASE_MS,
+} from "./types";
 
 type Client = PluginInput["client"];
+type Row = NonNullable<ReturnType<Store["primary"]>>;
+const QUOTA_CACHE_MS = 60_000;
+const pending = new Map<string, Promise<number | null>>();
+
+interface Window {
+  used_percent?: number;
+  reset_after_seconds?: number;
+  limit_window_seconds?: number;
+}
+
+interface Limit {
+  allowed?: boolean;
+  limit_reached?: boolean;
+  primary_window?: Window;
+  secondary_window?: Window;
+}
+
+interface Usage {
+  plan_type?: string;
+  rate_limit?: Limit;
+  additional_rate_limits?: Array<{
+    rate_limit?: Limit;
+  }>;
+}
+
+function weight(plan?: string) {
+  const key = plan?.toLowerCase();
+  if (key === "pro") return 10;
+  if (key === "plus") return 1;
+  if (key === "team") return 1;
+  return 1;
+}
 
 function mirror(
   client: Client,
@@ -73,9 +109,135 @@ function wait(res: Response) {
   return Math.max(at - Date.now(), 1000);
 }
 
+function reset(win: Window) {
+  const after = win.reset_after_seconds;
+  if (typeof after === "number" && Number.isFinite(after) && after > 0) return after;
+
+  const span = win.limit_window_seconds;
+  if (typeof span === "number" && Number.isFinite(span) && span > 0) return span;
+  return null;
+}
+
+function windowScore(win: Window | undefined, plan: number) {
+  if (!win) return null;
+  if (typeof win.used_percent !== "number") return null;
+  if (!Number.isFinite(win.used_percent)) return null;
+
+  const used = Math.min(Math.max(win.used_percent, 0), 100);
+  const left = 1 - used / 100;
+  const secs = reset(win);
+  if (secs === null) return null;
+
+  const span = win.limit_window_seconds;
+  if (typeof span === "number" && Number.isFinite(span) && span > 0) {
+    const pace = Math.max(secs / span, 0.000001);
+    return (plan * left) / pace;
+  }
+
+  return (plan * left) / secs;
+}
+
+function blocked(limit?: Limit) {
+  if (!limit) return false;
+  if (limit.allowed === false) return true;
+  return limit.limit_reached === true;
+}
+
+function limitScore(limit: Limit | undefined, plan: number) {
+  if (!limit) return null;
+  if (blocked(limit)) return 0;
+
+  const list = [
+    windowScore(limit.primary_window, plan),
+    windowScore(limit.secondary_window, plan),
+  ].filter((item): item is number => item !== null);
+
+  if (list.length === 0) return null;
+  return Math.min(...list);
+}
+
+function score(body: Usage) {
+  const plan = weight(body.plan_type);
+  const list = [limitScore(body.rate_limit, plan)];
+
+  for (const item of body.additional_rate_limits ?? []) {
+    list.push(limitScore(item.rate_limit, plan));
+  }
+
+  if (list.includes(0)) return 0;
+
+  const values = list.filter(
+    (item): item is number => item !== null,
+  );
+
+  if (values.length === 0) return null;
+  return Math.min(...values);
+}
+
+function refreshQuota(store: Store, row: Row) {
+  const account = row.chatgpt_account_id;
+  if (!account) return null;
+
+  const hit = store.quota(row.id, QUOTA_CACHE_MS);
+  if (hit !== undefined) return hit;
+
+  const held = pending.get(row.id);
+  if (held) return held;
+
+  const load = (async () => {
+    try {
+      const headers = new Headers();
+      headers.set("authorization", `Bearer ${row.access_token}`);
+      headers.set("accept", "application/json");
+      headers.set("ChatGPT-Account-Id", account);
+
+      const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
+      const value = res.ok ? score(((await res.json()) as Usage) ?? {}) : null;
+      if (value !== null) store.cacheQuota(row.id, value);
+      return value;
+    } catch {
+      return null;
+    } finally {
+      pending.delete(row.id);
+    }
+  })();
+
+  pending.set(row.id, load);
+  return load;
+}
+
 function pick(store: Store) {
   store.clearExpired();
   return store.available()[0] ?? store.primary() ?? store.list()[0];
+}
+
+async function ready(store: Store, row: Row, client: Client) {
+  if (row.expires_at > Date.now()) return row;
+
+  try {
+    return await renew(store, row, client);
+  } catch {
+    return row;
+  }
+}
+
+function rank(store: Store, rows: Row[]) {
+  const core = rows.find((item) => item.primary === 1);
+  const pool = rows.find((item) => item.primary !== 1);
+  if (!core || !pool) return rows;
+
+  const a = store.quota(core.id, QUOTA_CACHE_MS);
+  const b = store.quota(pool.id, QUOTA_CACHE_MS);
+
+  if (a === undefined || b === undefined) {
+    if (a === undefined) void refreshQuota(store, core);
+    if (b === undefined) void refreshQuota(store, pool);
+    return rows;
+  }
+
+  const rest = rows.filter((item) => item.id !== core.id);
+  if (a >= b) return [core, ...rest];
+  return [...rest, core];
 }
 
 async function renew(
@@ -104,6 +266,8 @@ async function renew(
       tokens.refresh_token,
       expires,
     );
+    store.clearQuota(row.id);
+    pending.delete(row.id);
     store.enable(row.id);
     store.clearCooldown(row.id);
 
@@ -178,9 +342,14 @@ export function createFetch(
     }
     const snap = body ? { ...init, body } : init;
 
-    const rows = store.available();
+    const rows = await Promise.all(
+      store.available().map((item) => ready(store, item, client)),
+    );
+    const ordered = rank(store, rows);
     const list =
-      rows.length > 0 ? rows : [pick(store)].filter((row) => row !== undefined);
+      ordered.length > 0
+        ? ordered
+        : [pick(store)].filter((row) => row !== undefined);
     let last: Response | Error | undefined;
 
     for (const item of list) {

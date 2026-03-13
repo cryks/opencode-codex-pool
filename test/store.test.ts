@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { open } from "../src/store";
 import type { Store } from "../src/store";
@@ -158,5 +161,28 @@ describe("store", () => {
     store.upsert(row("a", 3));
 
     expect(store.nextPriority()).toBe(4);
+  });
+
+  test("shares quota cache across store instances", () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
+    const a = open(path);
+    const b = open(path);
+
+    try {
+      a.upsert(row("shared", 0));
+      a.cacheQuota("shared", 0.5);
+
+      expect(b.quota("shared", 60_000)).toBe(0.5);
+
+      a.clearQuota("shared");
+
+      expect(b.quota("shared", 60_000)).toBeUndefined();
+    } finally {
+      a.close();
+      b.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
   });
 });
