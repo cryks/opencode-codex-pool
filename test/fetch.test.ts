@@ -107,6 +107,10 @@ function stub() {
   };
 }
 
+function body(hit: Hit) {
+  return JSON.parse(hit.body) as Record<string, unknown>;
+}
+
 function url(input: RequestInfo | URL) {
   return input instanceof Request ? input.url : input.toString();
 }
@@ -126,16 +130,19 @@ describe("createFetch", () => {
   let store: Store;
   let old: typeof fetch;
   let wait: typeof setTimeout;
+  let now: typeof Date.now;
 
   beforeEach(() => {
     store = open(":memory:");
     old = globalThis.fetch;
     wait = globalThis.setTimeout;
+    now = Date.now;
   });
 
   afterEach(() => {
     globalThis.fetch = old;
     globalThis.setTimeout = wait;
+    Date.now = now;
     store.close();
   });
 
@@ -187,7 +194,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-toast — unknown (pool)\nReason: higher score\nAccounts:\n- core-toast (core): 0.500\n- pool-toast (pool): 0.800",
+          "Using pool-toast — unknown (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  core-toast [unknown]: 0.500\n> pool-toast [unknown]: 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -216,7 +223,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using core-warm — unknown (core)\nReason: quota cache warming\nAccounts:\n- core-warm (core): n/a\n- pool-warm (pool): n/a",
+          "Using core-warm — unknown (core)\nFast-mode disabled\nReason: quota cache warming\nAccounts:\n> core-warm [unknown]: n/a\n  pool-warm [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -291,7 +298,48 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-429 — unknown (pool)\nReason: core-429 hit 429 cooldown\nAccounts:\n- core-429 (core): 0.900\n- pool-429 (pool): 0.400",
+          "Using pool-429 — unknown (pool)\nFast-mode disabled\nReason: core-429 hit 429 cooldown\nAccounts:\n  core-429 [unknown]: 0.900\n> pool-429 [unknown]: 0.400",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("aligns account names and plan labels in the toast list", async () => {
+    store.upsert(
+      row("core-align", 0, {
+        primary: 1,
+        label: "account1@foobar.com",
+        plan_type: "plus",
+      }),
+    );
+    store.setPrimary("core-align");
+    store.upsert(
+      row("pool-align", 1, {
+        label: "account2@a.com",
+        plan_type: "pro",
+      }),
+    );
+    store.cacheQuota("core-align", 0.5);
+    store.cacheQuota("pool-align", 0.8);
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using account2@a.com — pro (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  account1@foobar.com [plus]: 0.500\n> account2@a.com      [pro] : 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -357,7 +405,48 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-first — unknown (pool)\nReason: higher score\nAccounts:\n- core-compare (core): 0.500\n- pool-first (pool): 0.800",
+          "Using pool-first — unknown (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  core-compare [unknown]: 0.500\n> pool-first   [unknown]: 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("toast marks the winning fallback account after multi-pool failover", async () => {
+    store.upsert(row("core-fallback", 0, { primary: 1 }));
+    store.setPrimary("core-fallback");
+    store.upsert(row("pool-first-fallback", 1));
+    store.upsert(row("pool-second-fallback", 2));
+    store.cacheQuota("core-fallback", 0.9);
+    store.cacheQuota("pool-first-fallback", 0.8);
+
+    let hits = 0;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      hits += 1;
+      if (hits < 3) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using pool-second-fallback — unknown (pool)\nFast-mode disabled\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  core-fallback        [unknown]: 0.900\n  pool-first-fallback  [unknown]: 0.800\n> pool-second-fallback [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -400,6 +489,601 @@ describe("createFetch", () => {
       "Bearer a-access",
       "Bearer b-access",
     ]);
+  });
+
+  test("injects priority service tier when fresh quota is under-burned", async () => {
+    store.upsert(row("fast-on", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
+  test("shows fast-mode enabled in the account switch toast", async () => {
+    store.upsert(row("fast-toast", 0));
+
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using fast-toast — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-toast [unknown]: n/a",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("shows a toast when fast-mode flips for the same session", async () => {
+    store.upsert(row("fast-flip", 0));
+
+    let usageHits = 0;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 79 : 80,
+              reset_after_seconds: usageHits === 1 ? 900 : 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-flip",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 60_001;
+
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using fast-flip — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-flip [unknown]: n/a",
+        variant: "info",
+        duration: 10_000,
+      },
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode disabled — fast-flip (pool)\nReason: fresh usage fell below threshold",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("shows a toast when fast-mode flips from disabled to enabled for the same session", async () => {
+    store.upsert(row("fast-flip-up", 0));
+
+    let usageHits = 0;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 80 : 79,
+              reset_after_seconds: usageHits === 1 ? 1_000 : 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-flip-up",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 60_001;
+
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using fast-flip-up — unknown (pool)\nFast-mode disabled\nReason: only available account\nAccount:\n> fast-flip-up [unknown]: n/a",
+        variant: "info",
+        duration: 10_000,
+      },
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode enabled — fast-flip-up (pool)\nReason: fresh usage is ahead of time",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("does not show a fast-mode flip toast after affinity expires", async () => {
+    store.upsert(row("fast-expire", 0));
+
+    let usageHits = 0;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 79 : 80,
+              reset_after_seconds: usageHits === 1 ? 900 : 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-expire",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 300_001;
+
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using fast-expire — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-expire [unknown]: n/a",
+        variant: "info",
+        duration: 10_000,
+      },
+      {
+        title: "Codex Pool",
+        message:
+          "Using fast-expire — plus (pool)\nFast-mode disabled\nReason: only available account\nAccount:\n> fast-expire [plus]: 4.696 cached",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("skips priority injection when fresh quota delta is below threshold", async () => {
+    store.upsert(row("fast-off", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 80,
+              reset_after_seconds: 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("respects caller provided service_tier", async () => {
+    store.upsert(row("tier-snake", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        service_tier: "auto",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "auto",
+    });
+  });
+
+  test("respects caller provided serviceTier", async () => {
+    store.upsert(row("tier-camel", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        serviceTier: "auto",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      serviceTier: "auto",
+    });
+  });
+
+  test("does not use stale score cache when fresh usage cannot be loaded", async () => {
+    store.upsert(row("stale-only", 0));
+    store.cacheQuota("stale-only", 0.9);
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return new Response("nope", { status: 500 });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("rebuilds the body per attempt during failover", async () => {
+    store.upsert(row("fail-a", 0, { primary: 1 }));
+    store.setPrimary("fail-a");
+    store.upsert(row("fail-b", 1));
+
+    const hits: Hit[] = [];
+    let warm = true;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer fail-a-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 79,
+                reset_after_seconds: 900,
+                limit_window_seconds: 9_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 80,
+              reset_after_seconds: 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      if (warm) {
+        return new Response("ok", { status: 200 });
+      }
+
+      if (hits.length === 1) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    warm = false;
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(hits.map((item) => body(item))).toEqual([
+      { model: "gpt-5", input: "hi", service_tier: "priority" },
+      { model: "gpt-5", input: "hi" },
+    ]);
+  });
+
+  test("keeps Request bodies unchanged across failover when they are not JSON", async () => {
+    store.upsert(row("a", 0));
+    store.upsert(row("b", 1));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      if (hits.length === 1) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const req = new Request("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: "native-body",
+      headers: { "content-type": "text/plain" },
+    });
+    const res = await run(req);
+
+    expect(res.status).toBe(200);
+    expect(hits.map((item) => item.body)).toEqual(["native-body", "native-body"]);
+  });
+
+  test("uses the most conservative delta across additional rate limits", async () => {
+    store.upsert(row("fast-conservative", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 80,
+                  reset_after_seconds: 1_000,
+                  limit_window_seconds: 9_000,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
   });
 
   test("refreshes tokens after a 401 and updates the store", async () => {
