@@ -77,6 +77,20 @@ interface Usage {
   }>;
 }
 
+interface UsageHit {
+  at: number;
+  body: Usage;
+}
+
+interface JsonBody {
+  body: Record<string, unknown>;
+  tier: boolean;
+}
+
+const FAST_DELTA = 0.1;
+const usageCache = new Map<string, UsageHit>();
+const loadingUsage = new Map<string, Promise<Usage | null>>();
+
 function weight(plan?: string) {
   const key = plan?.toLowerCase();
   if (key === "pro") return 6.7;
@@ -269,6 +283,95 @@ function blocked(limit?: Limit) {
   return limit.limit_reached === true;
 }
 
+function readyWindow(win?: Window) {
+  if (!win) return undefined;
+  const used = win.used_percent;
+  const after = win.reset_after_seconds;
+  const span = win.limit_window_seconds;
+  if (typeof used !== "number") return null;
+  if (!Number.isFinite(used)) return null;
+  if (typeof after !== "number") return null;
+  if (!Number.isFinite(after) || after < 0) return null;
+  if (typeof span !== "number") return null;
+  if (!Number.isFinite(span) || span <= 0) return null;
+  return win;
+}
+
+function delta(win?: Window) {
+  const item = readyWindow(win);
+  if (item === undefined) return undefined;
+  if (item === null) return null;
+  const left = 1 - Math.min(Math.max(item.used_percent ?? 0, 0), 100) / 100;
+  const time = Math.min(
+    Math.max(item.reset_after_seconds ?? 0, 0) /
+      Math.max(item.limit_window_seconds ?? 1, 1),
+    1,
+  );
+  return left - time;
+}
+
+function limitDelta(limit?: Limit) {
+  if (!limit) return undefined;
+  if (blocked(limit)) return null;
+
+  const list = [delta(limit.primary_window), delta(limit.secondary_window)];
+  if (list.includes(null)) return null;
+  const values = list.filter((item): item is number => item !== undefined);
+  if (values.length === 0) return null;
+  return Math.min(...values);
+}
+
+function fast(usage: Usage) {
+  const list = [limitDelta(usage.rate_limit)];
+  for (const item of usage.additional_rate_limits ?? []) {
+    list.push(limitDelta(item.rate_limit));
+  }
+  if (list.includes(null)) return false;
+  const values = list.filter((item): item is number => item !== undefined);
+  if (values.length === 0) return false;
+  return Math.min(...values) >= FAST_DELTA;
+}
+
+function object(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseBody(body: ArrayBuffer | null) {
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(decoder.decode(body));
+    if (!object(parsed)) return undefined;
+    return {
+      body: parsed,
+      tier: "service_tier" in parsed || "serviceTier" in parsed,
+    } satisfies JsonBody;
+  } catch {
+    return undefined;
+  }
+}
+
+function withPriority(parsed: JsonBody | undefined) {
+  if (!parsed || parsed.tier) return undefined;
+  return {
+    ...parsed.body,
+    service_tier: "priority",
+  } satisfies Record<string, unknown>;
+}
+
+async function snapshot(input: RequestInfo | URL, init?: RequestInit) {
+  const src =
+    init?.body ?? (input instanceof Request ? input.clone().body ?? undefined : undefined);
+  if (!src) return null;
+  if (src instanceof ArrayBuffer) return src.slice(0);
+  if (ArrayBuffer.isView(src)) {
+    return src.buffer.slice(
+      src.byteOffset,
+      src.byteOffset + src.byteLength,
+    ) as ArrayBuffer;
+  }
+  return await new Response(src).arrayBuffer();
+}
+
 function limitScore(limit: Limit | undefined, plan: number) {
   if (!limit) return null;
   if (blocked(limit)) return 0;
@@ -301,8 +404,7 @@ function score(body: Usage) {
 }
 
 function refreshQuota(store: Store, row: Row) {
-  const account = row.chatgpt_account_id;
-  if (!account) return null;
+  if (!row.chatgpt_account_id) return null;
 
   const hit = store.quota(row.id, QUOTA_CACHE_MS);
   if (hit !== undefined) return hit;
@@ -312,16 +414,8 @@ function refreshQuota(store: Store, row: Row) {
 
   const load = (async () => {
     try {
-      const headers = new Headers();
-      headers.set("authorization", `Bearer ${row.access_token}`);
-      headers.set("accept", "application/json");
-      headers.set("ChatGPT-Account-Id", account);
-
-      const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
-      const usage = res.ok ? (((await res.json()) as Usage) ?? {}) : null;
+      const usage = await loadUsage(store, row);
       const value = usage ? score(usage) : null;
-      if (value !== null) store.cacheQuota(row.id, value);
-      if (usage?.plan_type) store.updatePlanType(row.id, usage.plan_type);
       return value;
     } catch {
       return null;
@@ -332,6 +426,67 @@ function refreshQuota(store: Store, row: Row) {
 
   pending.set(row.id, load);
   return load;
+}
+
+function freshUsage(row: Row) {
+  const cached = usageCache.get(row.id);
+  if (!cached) return null;
+  if (Date.now() - cached.at >= QUOTA_CACHE_MS) return null;
+  return cached.body;
+}
+
+async function loadUsage(store: Store, row: Row) {
+  const account = row.chatgpt_account_id;
+  if (!account) return null;
+
+  const cached = usageCache.get(row.id);
+  if (cached && Date.now() - cached.at < QUOTA_CACHE_MS) return cached.body;
+
+  const held = loadingUsage.get(row.id);
+  if (held) return held;
+
+  const load = (async () => {
+    try {
+      const headers = new Headers();
+      headers.set("authorization", `Bearer ${row.access_token}`);
+      headers.set("accept", "application/json");
+      headers.set("ChatGPT-Account-Id", account);
+
+      const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
+      if (!res.ok) return null;
+      const usage = ((await res.json()) as Usage) ?? {};
+      const value = score(usage);
+      if (value !== null) store.cacheQuota(row.id, value);
+      if (usage.plan_type) store.updatePlanType(row.id, usage.plan_type);
+      usageCache.set(row.id, { at: Date.now(), body: usage });
+      return usage;
+    } catch {
+      return null;
+    } finally {
+      loadingUsage.delete(row.id);
+    }
+  })();
+
+  loadingUsage.set(row.id, load);
+  return load;
+}
+
+function attempt(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  row: Row,
+  parsed: JsonBody | undefined,
+) {
+  const url = rewrite(input).toString();
+  if (url !== CODEX_API_ENDPOINT) return init;
+  const body = withPriority(parsed);
+  if (!body) return init;
+  const usage = freshUsage(row);
+  if (!usage || !fast(usage)) return init;
+  return {
+    ...init,
+    body: new TextEncoder().encode(JSON.stringify(body)).buffer,
+  } satisfies RequestInit;
 }
 
 function pick(store: Store) {
@@ -449,6 +604,8 @@ async function renew(
     );
     store.clearQuota(row.id);
     pending.delete(row.id);
+    usageCache.delete(row.id);
+    loadingUsage.delete(row.id);
     store.enable(row.id);
     store.clearCooldown(row.id);
 
@@ -509,21 +666,10 @@ export function createFetch(
     if (auth.type !== "oauth") return fetch(input, init);
 
     let body: ArrayBuffer | null = null;
-    if (init?.body) {
-      if (init.body instanceof ReadableStream) {
-        body = await new Response(init.body).arrayBuffer();
-      } else if (init.body instanceof ArrayBuffer) {
-        body = init.body;
-      } else if (ArrayBuffer.isView(init.body)) {
-        body = init.body.buffer.slice(
-          init.body.byteOffset,
-          init.body.byteOffset + init.body.byteLength,
-        ) as ArrayBuffer;
-      } else if (typeof init.body === "string") {
-        body = new TextEncoder().encode(init.body).buffer as ArrayBuffer;
-      }
-    }
+    body = await snapshot(input, init);
     const snap = body ? { ...init, body } : init;
+    const parsed = parseBody(body);
+    const candidate = withPriority(parsed);
 
     const session = cacheKey(body);
     let affinity: Affinity = { at: 0 };
@@ -552,6 +698,11 @@ export function createFetch(
       ordered.length > 0
         ? ordered
         : [pick(store)].filter((row) => row !== undefined);
+
+    if (candidate && list.length === 1 && !freshUsage(list[0])) {
+      await loadUsage(store, list[0]);
+    }
+
     let last: Response | Error | undefined;
     let note: string | undefined;
 
@@ -563,11 +714,11 @@ export function createFetch(
           row = await renew(store, row, client);
         }
 
-        let res = await send(input, snap, row);
+        let res = await send(input, attempt(input, snap, row, parsed), row);
 
         if (res.status === 401) {
           row = await renew(store, row, client);
-          res = await send(input, snap, row);
+          res = await send(input, attempt(input, snap, row, parsed), row);
         }
 
         if (res.status === 429) {
