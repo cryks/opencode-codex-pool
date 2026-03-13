@@ -207,30 +207,44 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
   };
 }
 
-function value(item: ScoreView) {
+function value(item: ScoreView, scoreWidth: number) {
   if (item.source === "missing") return "n/a";
 
   const tags = [];
   if (item.score === 0) tags.push("blocked");
   if (item.source === "stale") tags.push("cached");
-  const score = item.score?.toFixed(3) ?? "n/a";
+  const score = (item.score?.toFixed(3) ?? "n/a").padStart(scoreWidth);
   return tags.length > 0 ? `${score} ${tags.join(" ")}` : score;
 }
 
-function line(item: ScoreView, pick: string, nameWidth: number, planWidth: number) {
+function line(
+  item: ScoreView,
+  pick: string,
+  nameWidth: number,
+  planWidth: number,
+  scoreWidth: number,
+) {
   const head = item.id === pick ? ">" : " ";
   const label = item.name.padEnd(nameWidth);
   const tier = `[${item.plan}]`.padEnd(planWidth + 2);
-  return `${head} ${tier} ${label}: ${value(item)}`;
+  return `${head} ${tier} ${label}: ${value(item, scoreWidth)}`;
 }
 
 function describe(scores: ScoreView[], reason: string, pick: string) {
   const nameWidth = Math.max(...scores.map((item) => item.name.length));
   const planWidth = Math.max(...scores.map((item) => item.plan.length));
+  const scoreWidth = Math.max(
+    0,
+    ...scores.map((item) =>
+      item.source === "missing" ? 0 : (item.score?.toFixed(3) ?? "n/a").length,
+    ),
+  );
   const lines = [
     `Reason: ${reason}`,
     scores.length === 1 ? "Account:" : "Accounts:",
-    ...scores.map((item) => line(item, pick, nameWidth, planWidth)),
+    ...scores.map((item) =>
+      line(item, pick, nameWidth, planWidth, scoreWidth),
+    ),
   ];
   return lines.join("\n");
 }

@@ -384,7 +384,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("aligns account names and plan labels in the toast list", async () => {
+  test("aligns account names, plan labels, and score decimals in the toast list", async () => {
     store.upsert(
       row("core-align", 0, {
         primary: 1,
@@ -399,8 +399,8 @@ describe("createFetch", () => {
         plan_type: "pro",
       }),
     );
-    store.cacheQuota("core-align", 0.5);
-    store.cacheQuota("pool-align", 0.8);
+    store.cacheQuota("core-align", 123.456);
+    store.cacheQuota("pool-align", 4.567);
 
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -418,7 +418,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: higher score\nAccounts:\n  [plus] account1@foobar.com: 0.500\n> [pro]  account2@a.com     : 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n> [plus] account1@foobar.com: 123.456\n  [pro]  account2@a.com     :   4.567",
         variant: "info",
         duration: 10_000,
       },
