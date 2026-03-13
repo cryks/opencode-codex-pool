@@ -194,7 +194,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-toast — unknown (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  core-toast [unknown]: 0.500\n> pool-toast [unknown]: 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  core-toast [unknown]: 0.500\n> pool-toast [unknown]: 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -223,7 +223,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using core-warm — unknown (core)\nFast-mode disabled\nReason: quota cache warming\nAccounts:\n> core-warm [unknown]: n/a\n  pool-warm [unknown]: n/a",
+          "Fast-mode disabled\nReason: quota cache warming\nAccounts:\n> core-warm [unknown]: n/a\n  pool-warm [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -298,7 +298,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-429 — unknown (pool)\nFast-mode disabled\nReason: core-429 hit 429 cooldown\nAccounts:\n  core-429 [unknown]: 0.900\n> pool-429 [unknown]: 0.400",
+          "Fast-mode disabled\nReason: core-429 hit 429 cooldown\nAccounts:\n  core-429 [unknown]: 0.900\n> pool-429 [unknown]: 0.400",
         variant: "info",
         duration: 10_000,
       },
@@ -339,7 +339,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using account2@a.com — pro (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  account1@foobar.com [plus]: 0.500\n> account2@a.com      [pro] : 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  account1@foobar.com [plus]: 0.500\n> account2@a.com      [pro] : 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -405,7 +405,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-first — unknown (pool)\nFast-mode disabled\nReason: higher score\nAccounts:\n  core-compare [unknown]: 0.500\n> pool-first   [unknown]: 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  core-compare [unknown]: 0.500\n> pool-first   [unknown]: 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -446,7 +446,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-second-fallback — unknown (pool)\nFast-mode disabled\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  core-fallback        [unknown]: 0.900\n  pool-first-fallback  [unknown]: 0.800\n> pool-second-fallback [unknown]: n/a",
+          "Fast-mode disabled\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  core-fallback        [unknown]: 0.900\n  pool-first-fallback  [unknown]: 0.800\n> pool-second-fallback [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -576,7 +576,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using fast-toast — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-toast [unknown]: n/a",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> fast-toast [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -634,7 +634,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using fast-flip — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-flip [unknown]: n/a",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> fast-flip [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -699,7 +699,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using fast-flip-up — unknown (pool)\nFast-mode disabled\nReason: only available account\nAccount:\n> fast-flip-up [unknown]: n/a",
+          "Fast-mode disabled\nReason: only available account\nAccount:\n> fast-flip-up [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -764,14 +764,14 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using fast-expire — unknown (pool)\nFast-mode enabled\nReason: only available account\nAccount:\n> fast-expire [unknown]: n/a",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> fast-expire [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
         message:
-          "Using fast-expire — plus (pool)\nFast-mode disabled\nReason: only available account\nAccount:\n> fast-expire [plus]: 4.696 cached",
+          "Fast-mode disabled\nReason: only available account\nAccount:\n> fast-expire [plus]: 4.696 cached",
         variant: "info",
         duration: 10_000,
       },
