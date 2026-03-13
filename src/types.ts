@@ -60,3 +60,4 @@ export const DEFAULT_COOLDOWN_MS = 60_000;
 export const REFRESH_LEASE_MS = 30_000;
 export const CONSERVATION_REF = 14_400;
 export const CONSERVATION_HORIZON = 1_209_600;
+export const CAPACITY_REF = 1_800;
