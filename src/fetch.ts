@@ -25,6 +25,22 @@ interface Affinity {
   at: number;
 }
 
+type ScoreSource = "fresh" | "stale" | "missing";
+
+interface ScoreView {
+  id: string;
+  name: string;
+  role: "core" | "pool";
+  score?: number;
+  source: ScoreSource;
+}
+
+interface RankResult {
+  rows: Row[];
+  scores: ScoreView[];
+  reason?: string;
+}
+
 const decoder = new TextDecoder();
 
 function cacheKey(body: ArrayBuffer | null): string | undefined {
@@ -100,6 +116,69 @@ function copy(input: RequestInfo | URL, init?: HeadersInit) {
   headers.delete("authorization");
   headers.delete("Authorization");
   return headers;
+}
+
+function name(row: Row) {
+  return row.label || row.email || row.id.slice(0, 8);
+}
+
+function role(row: Row): "core" | "pool" {
+  return row.primary === 1 ? "core" : "pool";
+}
+
+function quota(store: Store, row: Row, warm = false): ScoreView {
+  const fresh = store.quota(row.id, QUOTA_CACHE_MS);
+  if (fresh !== undefined) {
+    return {
+      id: row.id,
+      name: name(row),
+      role: role(row),
+      score: fresh,
+      source: "fresh",
+    };
+  }
+
+  const stale = store.quota(row.id, STALE_QUOTA_MS);
+  if (warm) void refreshQuota(store, row);
+  if (stale !== undefined) {
+    return {
+      id: row.id,
+      name: name(row),
+      role: role(row),
+      score: stale,
+      source: "stale",
+    };
+  }
+
+  return {
+    id: row.id,
+    name: name(row),
+    role: role(row),
+    source: "missing",
+  };
+}
+
+function value(item: ScoreView) {
+  if (item.source === "missing") return "n/a";
+
+  const tags = [];
+  if (item.score === 0) tags.push("blocked");
+  if (item.source === "stale") tags.push("cached");
+  const score = item.score?.toFixed(3) ?? "n/a";
+  return tags.length > 0 ? `${score} ${tags.join(" ")}` : score;
+}
+
+function line(item: ScoreView) {
+  return `- ${item.name} (${item.role}): ${value(item)}`;
+}
+
+function describe(scores: ScoreView[], reason: string) {
+  const lines = [
+    `Reason: ${reason}`,
+    scores.length === 1 ? "Account:" : "Accounts:",
+    ...scores.map(line),
+  ];
+  return lines.join("\n");
 }
 
 function rewrite(input: RequestInfo | URL) {
@@ -251,24 +330,28 @@ async function ready(store: Store, row: Row, client: Client) {
   }
 }
 
-function rank(store: Store, rows: Row[], affinity: Affinity) {
+function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
   const core = rows.find((item) => item.primary === 1);
   const pool = rows.find((item) => item.primary !== 1);
-  if (!core || !pool) return rows;
+  if (!core || !pool) {
+    return {
+      rows,
+      scores: rows.map((row) => quota(store, row)),
+      reason: rows.length === 1 ? "only available account" : undefined,
+    };
+  }
 
-  let a = store.quota(core.id, QUOTA_CACHE_MS);
-  let b = store.quota(pool.id, QUOTA_CACHE_MS);
-
+  const aScore = quota(store, core, true);
+  const bScore = quota(store, pool, true);
+  const list = [aScore, bScore];
+  const a = aScore.score;
+  const b = bScore.score;
   if (a === undefined || b === undefined) {
-    if (a === undefined) {
-      a = store.quota(core.id, STALE_QUOTA_MS);
-      void refreshQuota(store, core);
-    }
-    if (b === undefined) {
-      b = store.quota(pool.id, STALE_QUOTA_MS);
-      void refreshQuota(store, pool);
-    }
-    if (a === undefined || b === undefined) return rows;
+    return {
+      rows,
+      scores: list,
+      reason: "quota cache warming",
+    };
   }
 
   const rest = rows.filter((item) => item.id !== core.id);
@@ -277,15 +360,46 @@ function rank(store: Store, rows: Row[], affinity: Affinity) {
     const hi = Math.max(a, b, 0.001);
     const margin = SWITCH_MARGIN * (0.5 + 0.5 * Math.min(a, b) / hi);
     if (affinity.id === core.id && a > 0) {
-      return b > a * (1 + margin) ? [...rest, core] : [core, ...rest];
+      return b > a * (1 + margin)
+        ? {
+            rows: [...rest, core],
+            scores: list,
+            reason: "higher score beat sticky core",
+          }
+        : {
+            rows: [core, ...rest],
+            scores: list,
+            reason: "sticky session kept core",
+          };
     }
     if (affinity.id === pool.id && b > 0) {
-      return a > b * (1 + margin) ? [core, ...rest] : [...rest, core];
+      return a > b * (1 + margin)
+        ? {
+            rows: [core, ...rest],
+            scores: list,
+            reason: "higher score beat sticky pool",
+          }
+        : {
+            rows: [...rest, core],
+            scores: list,
+            reason: "sticky session kept pool",
+          };
     }
   }
 
-  if (a >= b) return [core, ...rest];
-  return [...rest, core];
+  if (a >= b) {
+    return {
+      rows: [core, ...rest],
+      scores: list,
+      reason: a === b ? "tied score kept core priority" : "higher score",
+    };
+  }
+
+  return {
+    rows: [...rest, core],
+    scores: list,
+    reason: "higher score",
+  };
 }
 
 async function renew(
@@ -370,7 +484,6 @@ export function createFetch(
   client: Client,
 ) {
   const sessions = new Map<string, Affinity>();
-  const noAffinity: Affinity = { at: 0 };
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const auth = await getAuth();
@@ -394,7 +507,7 @@ export function createFetch(
     const snap = body ? { ...init, body } : init;
 
     const session = cacheKey(body);
-    let affinity = noAffinity;
+    let affinity: Affinity = { at: 0 };
     if (session) {
       const entry = sessions.get(session);
       if (entry) {
@@ -407,19 +520,21 @@ export function createFetch(
         const now = Date.now();
         for (const [k, v] of sessions) {
           if (now - v.at >= AFFINITY_MS) sessions.delete(k);
+          }
         }
       }
-    }
 
     const rows = await Promise.all(
       store.available().map((item) => ready(store, item, client)),
     );
-    const ordered = rank(store, rows, affinity);
+    const ranked = rank(store, rows, affinity);
+    const ordered = ranked.rows;
     const list =
       ordered.length > 0
         ? ordered
         : [pick(store)].filter((row) => row !== undefined);
     let last: Response | Error | undefined;
+    let note: string | undefined;
 
     for (const item of list) {
       let row = item;
@@ -438,6 +553,7 @@ export function createFetch(
 
         if (res.status === 429) {
           const ms = wait(res);
+          note = `${name(row)} hit 429 cooldown`;
           store.setCooldown(
             row.id,
             Date.now() + ms,
@@ -450,6 +566,7 @@ export function createFetch(
         }
 
         if (res.status === 401) {
+          note = `${name(row)} stayed unauthorized`;
           store.disable(row.id, res.statusText || "unauthorized");
           last = res;
           continue;
@@ -459,25 +576,30 @@ export function createFetch(
           store.enable(row.id);
           store.clearCooldown(row.id);
           if (affinity.id !== row.id) {
-            const name = row.label || row.email || row.id.slice(0, 8);
             const plan = row.plan_type ?? "unknown";
-            const role = row.primary === 1 ? "core" : "pool";
+            const detail = describe(
+              ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
+              note ?? ranked.reason ?? "selected account",
+            );
             void client.tui.showToast({
               body: {
                 title: "Codex Pool",
-                message: `Using ${name} — ${plan} (${role})`,
+                message: `Using ${name(row)} — ${plan} (${role(row)})\n${detail}`,
                 variant: "info",
-                duration: 3000,
+                duration: 10_000,
               },
             });
           }
-          affinity.id = row.id;
-          affinity.at = Date.now();
+          if (session) {
+            affinity.id = row.id;
+            affinity.at = Date.now();
+          }
         }
 
         return res;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        note = `${name(row)} errored`;
         store.disable(row.id, msg);
         last = err instanceof Error ? err : new Error(msg);
       }

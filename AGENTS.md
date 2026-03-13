@@ -44,6 +44,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
 - When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
 - Request bodies are snapshotted before retries so failover and refresh retries can safely replay the same payload.
+- When the selected account changes, the success toast includes a compact score summary for the accounts that participated in the selection decision plus a short reason string (for example, higher score, quota cache warming, or failover after a `429`).
 
 ### Coexistence with built-in CodexAuthPlugin
 

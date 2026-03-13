@@ -18,6 +18,13 @@ interface Hit {
   body: string;
 }
 
+interface Toast {
+  title: string;
+  message: string;
+  variant: string;
+  duration: number;
+}
+
 function row(
   id: string,
   priority: number,
@@ -79,8 +86,10 @@ function usage(input: number | Record<string, unknown>, reset?: number) {
 
 function stub() {
   const calls: unknown[] = [];
+  const toasts: Toast[] = [];
   return {
     calls,
+    toasts,
     client: {
       auth: {
         set: async (input: unknown) => {
@@ -89,7 +98,10 @@ function stub() {
         },
       },
       tui: {
-        showToast: async () => true,
+        showToast: async (input: { body: Toast }) => {
+          toasts.push(input.body);
+          return true;
+        },
       },
     } as unknown as PluginInput["client"],
   };
@@ -152,6 +164,65 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("shows account scores in the toast when quota decides the winner", async () => {
+    store.upsert(row("core-toast", 0, { primary: 1 }));
+    store.setPrimary("core-toast");
+    store.upsert(row("pool-toast", 1));
+    store.cacheQuota("core-toast", 0.5);
+    store.cacheQuota("pool-toast", 0.8);
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using pool-toast — unknown (pool)\nReason: higher score\nAccounts:\n- core-toast (core): 0.500\n- pool-toast (pool): 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("shows warming state when quota scores are not cached yet", async () => {
+    store.upsert(row("core-warm", 0, { primary: 1 }));
+    store.setPrimary("core-warm");
+    store.upsert(row("pool-warm", 1));
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({ plan_type: "plus", rate_limit: {} });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using core-warm — unknown (core)\nReason: quota cache warming\nAccounts:\n- core-warm (core): n/a\n- pool-warm (pool): n/a",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
   test("fails over on 429 and cools down the first account", async () => {
     store.upsert(row("a", 0));
     store.upsert(row("b", 1));
@@ -185,6 +256,112 @@ describe("createFetch", () => {
       "Bearer b-access",
     ]);
     expect(store.available().map((item) => item.id)).toEqual(["b"]);
+  });
+
+  test("shows failover reason in the toast after a 429", async () => {
+    store.upsert(row("core-429", 0, { primary: 1 }));
+    store.setPrimary("core-429");
+    store.upsert(row("pool-429", 1));
+    store.cacheQuota("core-429", 0.9);
+    store.cacheQuota("pool-429", 0.4);
+
+    let hits = 0;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      hits += 1;
+      if (hits === 1) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using pool-429 — unknown (pool)\nReason: core-429 hit 429 cooldown\nAccounts:\n- core-429 (core): 0.900\n- pool-429 (pool): 0.400",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("requests without prompt_cache_key do not keep sticky affinity", async () => {
+    store.upsert(row("core-no-session", 0, { primary: 1 }));
+    store.setPrimary("core-no-session");
+    store.upsert(row("pool-no-session", 1));
+
+    store.cacheQuota("core-no-session", 0.5);
+    store.cacheQuota("pool-no-session", 0.55);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+
+    store.cacheQuota("core-no-session", 0.56);
+    store.cacheQuota("pool-no-session", 0.55);
+
+    await run("https://api.openai.com/v1/responses");
+
+    expect(hits).toEqual([
+      "Bearer pool-no-session-access",
+      "Bearer core-no-session-access",
+    ]);
+  });
+
+  test("toast only shows compared core and pool scores", async () => {
+    store.upsert(row("core-compare", 0, { primary: 1 }));
+    store.setPrimary("core-compare");
+    store.upsert(row("pool-first", 1));
+    store.upsert(row("pool-second", 2));
+    store.cacheQuota("core-compare", 0.5);
+    store.cacheQuota("pool-first", 0.8);
+    store.cacheQuota("pool-second", 1.2);
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using pool-first — unknown (pool)\nReason: higher score\nAccounts:\n- core-compare (core): 0.500\n- pool-first (pool): 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
   });
 
   test("reuses a snapshotted request body after failover", async () => {
@@ -1053,7 +1230,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     const body = JSON.stringify({ prompt_cache_key: "ses-sticky" });
 
@@ -1071,6 +1248,7 @@ describe("createFetch", () => {
       "Bearer pool-sticky-access",
       "Bearer pool-sticky-access",
     ]);
+    expect(toasts).toHaveLength(1);
   });
 
   test("sticky affinity yields when alternative score exceeds margin", async () => {

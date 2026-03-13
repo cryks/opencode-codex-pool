@@ -10,6 +10,7 @@
 - Retries on rate limits by cooling down the current account and moving to the next available one.
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
+- Shows a compact selection toast with compared account scores and the reason the winning account was chosen.
 
 ## How it works
 
