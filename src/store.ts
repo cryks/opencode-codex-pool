@@ -450,11 +450,11 @@ export function open(path?: string) {
       })?.score;
     },
 
-    cacheQuota(id: string, score: number) {
+    cacheQuota(id: string, score: number, at?: number) {
       return cache.run({
         account_id: id,
         score,
-        updated_at: Date.now(),
+        updated_at: at ?? Date.now(),
       }).changes > 0;
     },
 

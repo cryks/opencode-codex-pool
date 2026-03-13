@@ -12,6 +12,7 @@ import {
 type Client = PluginInput["client"];
 type Row = NonNullable<ReturnType<Store["primary"]>>;
 const QUOTA_CACHE_MS = 60_000;
+const STALE_QUOTA_MS = 86_400_000;
 const pending = new Map<string, Promise<number | null>>();
 
 interface Window {
@@ -226,13 +227,19 @@ function rank(store: Store, rows: Row[]) {
   const pool = rows.find((item) => item.primary !== 1);
   if (!core || !pool) return rows;
 
-  const a = store.quota(core.id, QUOTA_CACHE_MS);
-  const b = store.quota(pool.id, QUOTA_CACHE_MS);
+  let a = store.quota(core.id, QUOTA_CACHE_MS);
+  let b = store.quota(pool.id, QUOTA_CACHE_MS);
 
   if (a === undefined || b === undefined) {
-    if (a === undefined) void refreshQuota(store, core);
-    if (b === undefined) void refreshQuota(store, pool);
-    return rows;
+    if (a === undefined) {
+      a = store.quota(core.id, STALE_QUOTA_MS);
+      void refreshQuota(store, core);
+    }
+    if (b === undefined) {
+      b = store.quota(pool.id, STALE_QUOTA_MS);
+      void refreshQuota(store, pool);
+    }
+    if (a === undefined || b === undefined) return rows;
   }
 
   const rest = rows.filter((item) => item.id !== core.id);

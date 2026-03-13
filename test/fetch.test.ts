@@ -883,6 +883,50 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("expired quota cache uses stale scores for ordering while refreshing in background", async () => {
+    store.upsert(row("core-stale", 0, { primary: 1 }));
+    store.setPrimary("core-stale");
+    store.upsert(row("pool-stale", 1));
+
+    const staleAt = Date.now() - 120_000;
+    store.cacheQuota("core-stale", 0.5, staleAt);
+    store.cacheQuota("pool-stale", 0.8, staleAt);
+
+    let scans = 0;
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        if (auth === "Bearer core-stale-access") return usage(50, 600);
+        return usage(30, 600);
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    const first = await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(scans).toBe(2);
+    expect(hits).toEqual([
+      "Bearer pool-stale-access",
+      "Bearer pool-stale-access",
+    ]);
+  });
+
   test("refresh clears a stale quota cache and falls back to core until usage is rewarmed", async () => {
     store.upsert(row("core-refresh", 0, { primary: 1 }));
     store.setPrimary("core-refresh");
