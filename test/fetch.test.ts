@@ -1279,7 +1279,7 @@ describe("createFetch", () => {
                 limit_window_seconds: 18_000,
               },
               secondary_window: {
-                used_percent: 99,
+                used_percent: 99.8,
                 reset_after_seconds: 600,
                 limit_window_seconds: 604_800,
               },
@@ -1755,7 +1755,7 @@ describe("createFetch", () => {
             plan_type: "plus",
             rate_limit: {
               primary_window: {
-                used_percent: 50,
+                used_percent: 85,
                 reset_after_seconds: 518_400,
                 limit_window_seconds: 604_800,
               },
@@ -1869,7 +1869,7 @@ describe("createFetch", () => {
             plan_type: "plus",
             rate_limit: {
               primary_window: {
-                used_percent: 10,
+                used_percent: 80,
                 reset_after_seconds: 2_592_000,
                 limit_window_seconds: 2_592_000,
               },

@@ -9,6 +9,7 @@ import {
   REFRESH_LEASE_MS,
   CONSERVATION_REF,
   CONSERVATION_HORIZON,
+  CAPACITY_REF,
 } from "./types";
 
 type Client = PluginInput["client"];
@@ -91,7 +92,7 @@ const loadingUsage = new Map<string, Promise<Usage | null>>();
 
 function weight(plan?: string) {
   const key = plan?.toLowerCase();
-  if (key === "pro") return 10;
+  if (key === "pro") return 6.7;
   if (key === "plus") return 1;
   if (key === "team") return 1;
   return 1;
@@ -252,7 +253,8 @@ function windowScore(win: Window | undefined, plan: number) {
       1,
       Math.min(CONSERVATION_CAP, 1 + Math.log(secs / CONSERVATION_REF)),
     );
-    return (plan * left) / (pace * cons);
+    const cap = Math.sqrt(span / CAPACITY_REF);
+    return (plan * left * cap) / (pace * cons);
   }
 
   return (plan * left) / secs;
