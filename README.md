@@ -6,7 +6,7 @@
 
 - Mirrors one primary OAuth account into opencode so Codex-specific behavior stays active.
 - Stores all account tokens and routing state in SQLite.
-- Routes requests between the primary account (`core`) and secondary accounts (`pool`) based on remaining quota score.
+- Reorders all currently available accounts by remaining quota score, across both the primary account (`core`) and secondary accounts (`pool`).
 - Retries on rate limits by cooling down the current account and moving to the next available one.
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
@@ -16,13 +16,17 @@
 
 ## How it works
 
-The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in Codex plugin still runs first, so model filtering and Codex-specific behavior stay intact. This plugin then supplies a dummy OAuth API key plus a replacement fetch layer, while leaving the rest of the Codex integration alone.
+- **Plugin integration**: The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in Codex plugin still runs first, so model filtering and Codex-specific behavior stay intact. This plugin then supplies a dummy OAuth API key plus a replacement fetch layer while leaving the rest of the Codex integration alone.
 
-At runtime, the router computes a quota score for every available account from the ChatGPT usage endpoint, then reorders the whole candidate list by score. Higher score means the account has more weighted capacity worth spending now, so it goes first; ties fall back to the stored priority order. This applies to whatever available fleet remains for that request, including pool-only fallback after `core` is cooled down or disabled. Scores account for both the absolute capacity of each rate-limit window (larger windows like 7-day limits represent more usable room than smaller 5-hour limits) and a conservation factor that penalizes windows with long recovery times after they have started. Because the 5-hour and 7-day windows are first-use-anchored, untouched windows are treated as dormant: they keep their capacity boost so the router is willing to start their clock early, but they do not receive long-recovery conservation dampening until the countdown has materially moved. Once a window is active, the usual conservation math applies, and near-reset windows of any duration are burned aggressively to avoid waste. If a request gets a `429`, that account is placed on cooldown and the next ranked account is tried. If a request gets a `401`, the plugin refreshes the token and retries once.
+- **Account model and state**: `core` is the primary mirrored OAuth account that keeps opencode in Codex mode. `pool` is every non-primary account stored in SQLite. SQLite is the runtime source of truth for account tokens, cooldown state, refresh locks, and shared quota cache, while pool auth state is represented with an inert shadow provider marker.
 
-When a request body contains `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for a short time. It only abandons that affinity when the best currently ranked alternative account is meaningfully better, blocked, or no longer available.
+- **Quota-aware routing**: For each request, the router computes a quota score for every currently available account from the ChatGPT usage endpoint, then reorders the full candidate list by score. Higher score means more weighted capacity is worth spending now, and ties fall back to stored priority. The score combines plan weight, remaining capacity, window size, and recovery cost; when a limit has both primary and secondary windows, or when additional limits exist, the most conservative score wins. First-use-anchored windows are treated as dormant until their countdown meaningfully starts, so they keep their capacity boost without long-recovery dampening.
 
-After the account is chosen, the fetch layer may decorate that attempt with `service_tier: "priority"`. This is intentionally post-ranking: routing still uses the existing quota score, then fast-mode checks the selected account's in-memory usage cache. That in-memory usage cache is separate from the shared SQLite quota score cache. Fresh usage is authoritative for 60 seconds; stale cached usage may still drive the current foreground attempt while a background refresh starts, and only missing usage forces a synchronous warm-up for a single-account prompt attempt. The trigger stays conservative but is now span-aware: for every complete window in every rate limit, it computes `remaining_capacity = 1 - used_percent / 100` and `remaining_time = reset_after_seconds / limit_window_seconds`, then subtracts a required slack that varies by both window size and remaining time. Windows at or below the 5-hour baseline (`18_000s`) require roughly `10%` extra slack early in the window and ease toward `7%` near reset. A 7-day window (`604_800s`) starts around `8%` and eases toward `2%`, with log-scaled interpolation for spans in between. Priority is enabled only when the minimum `remaining_capacity - remaining_time - required_slack` across all complete windows is non-negative. Caller-provided `service_tier` or `serviceTier` always wins, and each retry/failover rebuilds its body from the immutable base snapshot so one account's tier choice never leaks into another attempt. The account-selection toast includes a `Fast-mode enabled` or `Fast-mode disabled` line for the winning attempt, marks the selected account with `>` in the `Account:`/`Accounts:` list, right-aligns numeric score text so decimal points line up across rows, and sticky sessions emit a separate fast-mode toast if that state flips later without switching accounts.
+- **Sticky affinity**: When a request body includes `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for five minutes. It only switches away when the best currently ranked alternative is materially better, blocked, or no longer available.
+
+- **Dynamic fast-mode**: After the account is chosen, the fetch layer may decorate that attempt with `service_tier: "priority"`. This is intentionally post-ranking: routing uses the shared SQLite quota cache, while fast-mode checks the selected account's separate in-memory usage cache. Fast-mode stays conservative, is span-aware across complete windows, turns off when a considered limit is blocked or incomplete, and never overrides a caller-provided `service_tier` or `serviceTier`.
+
+- **Retries and replay safety**: If a request gets a `429`, that account is placed on cooldown and the next ranked account is tried. If a request gets a `401`, the plugin refreshes the token and retries once. Request bodies are snapshotted before retries so failover and token refresh can safely replay the same payload without leaking one attempt's `service_tier` decision into another. Selection toasts are emitted immediately before the outbound prompt attempt for the chosen account.
 
 ## Install
 
@@ -73,9 +77,9 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - Default database path: `~/.local/share/opencode/codex-pool.db`
 - SQLite is the runtime source of truth for accounts, cooldowns, refresh locks, and shared quota cache.
 - The database runs in WAL mode so multiple opencode instances can share the same state.
-- Quota scores are cached for 60 seconds and reused across instances.
-- When quota cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When cache data is stale but still within the 24-hour fallback window, requests reuse the stale scores for ordering while warming fresh data in the background.
-- Dynamic fast-mode uses the selected account's in-memory usage cache. Fresh usage stays authoritative for 60 seconds; stale cached usage still applies to the current request while a background refresh is started. Only missing usage forces a synchronous warm-up before a single-account prompt attempt.
+- Quota scores are cached in SQLite for 60 seconds and reused across instances for ranking.
+- When shared quota cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When shared quota cache data is stale but still within the 24-hour fallback window, requests reuse the stale scores for ordering while warming fresh data in the background.
+- Dynamic fast-mode uses a separate in-memory usage cache for the selected account. Fresh usage stays authoritative for 60 seconds; stale cached usage still applies to the current request while a background refresh is started. Only missing usage forces a synchronous warm-up before a single-account prompt attempt.
 - Successful token refresh clears the account's cached quota score so future ranking uses fresh credentials.
 
 ## Development
@@ -93,15 +97,16 @@ Tests use real SQLite databases (`:memory:` or temporary files), including multi
 ```text
 src/
   index.ts   - plugin entry, auth hook, auth methods, loader
-  fetch.ts   - quota-aware routing, 429 failover, sticky affinity, token refresh, refresh locking
+  fetch.ts   - quota-aware routing, request URL rewrite, 429 failover, sticky affinity, token refresh, refresh locking
   store.ts   - SQLite CRUD for accounts, cooldowns, locks, quota cache
   oauth.ts   - browser OAuth flow, device flow, token refresh
   sync.ts    - bootstrap existing primary auth into SQLite
   codex.ts   - PKCE helpers, JWT parsing, token exchange
   types.ts   - shared types and constants
 test/
-  fetch.test.ts - routing and failover tests
-  store.test.ts - store behavior tests
+  fetch.test.ts - routing, failover, refresh, affinity, fast-mode, and cache behavior tests
+  index.test.ts - pool account editor auth method tests
+  store.test.ts - store, cooldown, lock, and shared cache behavior tests
 ```
 
 ## Notes and caveats
