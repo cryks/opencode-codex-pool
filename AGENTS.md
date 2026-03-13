@@ -22,7 +22,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - The quota signal comes from `https://chatgpt.com/backend-api/wham/usage`, using the account's bearer token plus `ChatGPT-Account-Id`.
 - The decision metric is a burn score computed from any available rate-limit window as `(100 - used_percent) / reset_after_seconds`. Higher score means "this account has more remaining capacity that resets sooner, so burn it first." When both primary and secondary windows exist, use the larger score.
 - Quota scores are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
-- If the quota cache is missing or stale for either side, do not block the foreground request waiting on usage. Keep the current priority order for that request (which normally means `core` first), and warm the missing usage entries in the background.
+- If the quota cache is stale (older than 60s) for either side, use the expired cached scores for ordering rather than defaulting to priority order, and warm the stale entries in the background. If the quota cache is cold (never fetched) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
 - Once both sides have fresh cached scores, reorder requests by score: keep `core` before the pool group when `core >= pool`, otherwise move `core` behind the pool group.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's quota cache before future ranking, because the old score may have been computed from stale credentials.
@@ -46,6 +46,10 @@ src/
   fetch.ts   — Multi-account fetch with quota-aware ordering, 429 failover, token refresh, URL rewrite
   types.ts   — Shared types and constants
 ```
+
+## Agent rules
+
+- When an agent changes the program's specification — including behavior, architecture, design decisions, routing logic, constants, file structure, or any other documented contract — the agent MUST update this AGENTS.md to reflect the change before considering the task complete.
 
 ## Style guide
 
