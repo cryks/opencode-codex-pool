@@ -87,6 +87,9 @@ function stub() {
           return {};
         },
       },
+      tui: {
+        showToast: async () => true,
+      },
     } as unknown as PluginInput["client"],
   };
 }

@@ -447,6 +447,18 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
+          if (affinity.id !== row.id) {
+            const tag = row.primary === 1 ? "core" : "pool";
+            const name = row.label || row.email || row.id.slice(0, 8);
+            void client.tui.showToast({
+              body: {
+                title: "Codex Pool",
+                message: `${name} (${tag})`,
+                variant: "info",
+                duration: 3000,
+              },
+            });
+          }
           affinity.id = row.id;
           affinity.at = Date.now();
         }
