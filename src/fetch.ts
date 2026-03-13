@@ -838,7 +838,6 @@ export function createFetch(
           store.clearCooldown(row.id);
           const sticky = active(affinity);
           if (!sticky || affinity.id !== row.id) {
-            const tier = plan(row);
             const scores = listed(
               ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
               quota(store, row),
@@ -851,9 +850,7 @@ export function createFetch(
             void client.tui.showToast({
               body: {
                 title: "Codex Pool",
-                message:
-                  `Using ${name(row)} — ${tier} (${role(row)})\n` +
-                  `${fastLine(used.fast)}\n${detail}`,
+                message: `${fastLine(used.fast)}\n${detail}`,
                 variant: "info",
                 duration: 10_000,
               },
