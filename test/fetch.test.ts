@@ -187,7 +187,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-toast — unknown (pool)\nReason: higher score\nAccounts:\n- core-toast (core): 0.500\n- pool-toast (pool): 0.800",
+          "Using pool-toast — unknown (pool)\nReason: higher score\nAccounts:\n  core-toast [unknown]: 0.500\n> pool-toast [unknown]: 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -216,7 +216,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using core-warm — unknown (core)\nReason: quota cache warming\nAccounts:\n- core-warm (core): n/a\n- pool-warm (pool): n/a",
+          "Using core-warm — unknown (core)\nReason: quota cache warming\nAccounts:\n> core-warm [unknown]: n/a\n  pool-warm [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },
@@ -291,7 +291,48 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-429 — unknown (pool)\nReason: core-429 hit 429 cooldown\nAccounts:\n- core-429 (core): 0.900\n- pool-429 (pool): 0.400",
+          "Using pool-429 — unknown (pool)\nReason: core-429 hit 429 cooldown\nAccounts:\n  core-429 [unknown]: 0.900\n> pool-429 [unknown]: 0.400",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("aligns account names and plan labels in the toast list", async () => {
+    store.upsert(
+      row("core-align", 0, {
+        primary: 1,
+        label: "account1@foobar.com",
+        plan_type: "plus",
+      }),
+    );
+    store.setPrimary("core-align");
+    store.upsert(
+      row("pool-align", 1, {
+        label: "account2@a.com",
+        plan_type: "pro",
+      }),
+    );
+    store.cacheQuota("core-align", 0.5);
+    store.cacheQuota("pool-align", 0.8);
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using account2@a.com — pro (pool)\nReason: higher score\nAccounts:\n  account1@foobar.com [plus]: 0.500\n> account2@a.com      [pro] : 0.800",
         variant: "info",
         duration: 10_000,
       },
@@ -357,7 +398,48 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Using pool-first — unknown (pool)\nReason: higher score\nAccounts:\n- core-compare (core): 0.500\n- pool-first (pool): 0.800",
+          "Using pool-first — unknown (pool)\nReason: higher score\nAccounts:\n  core-compare [unknown]: 0.500\n> pool-first   [unknown]: 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("toast marks the winning fallback account after multi-pool failover", async () => {
+    store.upsert(row("core-fallback", 0, { primary: 1 }));
+    store.setPrimary("core-fallback");
+    store.upsert(row("pool-first-fallback", 1));
+    store.upsert(row("pool-second-fallback", 2));
+    store.cacheQuota("core-fallback", 0.9);
+    store.cacheQuota("pool-first-fallback", 0.8);
+
+    let hits = 0;
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      hits += 1;
+      if (hits < 3) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Using pool-second-fallback — unknown (pool)\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  core-fallback        [unknown]: 0.900\n  pool-first-fallback  [unknown]: 0.800\n> pool-second-fallback [unknown]: n/a",
         variant: "info",
         duration: 10_000,
       },

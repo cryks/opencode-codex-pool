@@ -31,6 +31,7 @@ type ScoreSource = "fresh" | "stale" | "missing";
 interface ScoreView {
   id: string;
   name: string;
+  plan: string;
   role: "core" | "pool";
   score?: number;
   source: ScoreSource;
@@ -127,12 +128,17 @@ function role(row: Row): "core" | "pool" {
   return row.primary === 1 ? "core" : "pool";
 }
 
+function plan(row: Row) {
+  return row.plan_type ?? "unknown";
+}
+
 function quota(store: Store, row: Row, warm = false): ScoreView {
   const fresh = store.quota(row.id, QUOTA_CACHE_MS);
   if (fresh !== undefined) {
     return {
       id: row.id,
       name: name(row),
+      plan: plan(row),
       role: role(row),
       score: fresh,
       source: "fresh",
@@ -145,6 +151,7 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
     return {
       id: row.id,
       name: name(row),
+      plan: plan(row),
       role: role(row),
       score: stale,
       source: "stale",
@@ -154,6 +161,7 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
   return {
     id: row.id,
     name: name(row),
+    plan: plan(row),
     role: role(row),
     source: "missing",
   };
@@ -169,17 +177,26 @@ function value(item: ScoreView) {
   return tags.length > 0 ? `${score} ${tags.join(" ")}` : score;
 }
 
-function line(item: ScoreView) {
-  return `- ${item.name} (${item.role}): ${value(item)}`;
+function line(item: ScoreView, pick: string, nameWidth: number, planWidth: number) {
+  const head = item.id === pick ? ">" : " ";
+  const label = item.name.padEnd(nameWidth);
+  const tier = `[${item.plan}]`.padEnd(planWidth + 2);
+  return `${head} ${label} ${tier}: ${value(item)}`;
 }
 
-function describe(scores: ScoreView[], reason: string) {
+function describe(scores: ScoreView[], reason: string, pick: string) {
+  const nameWidth = Math.max(...scores.map((item) => item.name.length));
+  const planWidth = Math.max(...scores.map((item) => item.plan.length));
   const lines = [
     `Reason: ${reason}`,
     scores.length === 1 ? "Account:" : "Accounts:",
-    ...scores.map(line),
+    ...scores.map((item) => line(item, pick, nameWidth, planWidth)),
   ];
   return lines.join("\n");
+}
+
+function listed(scores: ScoreView[], item: ScoreView) {
+  return scores.some((score) => score.id === item.id) ? scores : [...scores, item];
 }
 
 function rewrite(input: RequestInfo | URL) {
@@ -578,15 +595,20 @@ export function createFetch(
           store.enable(row.id);
           store.clearCooldown(row.id);
           if (affinity.id !== row.id) {
-            const plan = row.plan_type ?? "unknown";
-            const detail = describe(
+            const tier = plan(row);
+            const scores = listed(
               ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
+              quota(store, row),
+            );
+            const detail = describe(
+              scores,
               note ?? ranked.reason ?? "selected account",
+              row.id,
             );
             void client.tui.showToast({
               body: {
                 title: "Codex Pool",
-                message: `Using ${name(row)} — ${plan} (${role(row)})\n${detail}`,
+                message: `Using ${name(row)} — ${tier} (${role(row)})\n${detail}`,
                 variant: "info",
                 duration: 10_000,
               },
