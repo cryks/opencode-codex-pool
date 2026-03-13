@@ -11,7 +11,7 @@
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
 - Dynamically injects `service_tier: "priority"` for under-burned requests when cached or freshly warmed usage data shows capacity is ahead of time.
-- Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, aligned compared account scores, and the reason that account was chosen.
+- Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, aligned compared account scores in `[plan] account: score` form, and the reason that account was chosen.
 - Shows a separate toast when fast-mode flips for the same sticky session without an account switch.
 
 ## How it works

@@ -221,7 +221,7 @@ function line(item: ScoreView, pick: string, nameWidth: number, planWidth: numbe
   const head = item.id === pick ? ">" : " ";
   const label = item.name.padEnd(nameWidth);
   const tier = `[${item.plan}]`.padEnd(planWidth + 2);
-  return `${head} ${label} ${tier}: ${value(item)}`;
+  return `${head} ${tier} ${label}: ${value(item)}`;
 }
 
 function describe(scores: ScoreView[], reason: string, pick: string) {
