@@ -66,7 +66,7 @@ src/
 
 ## Style guide
 
-Follow the opencode repo style (see `/Users/rbr/work/opencode/AGENTS.md`):
+Follow the opencode repo style:
 
 - Single-word variable names preferred
 - `const` over `let`; ternaries or early returns over reassignment
@@ -89,7 +89,7 @@ Build the plugin artifact with `bun run build`, then point opencode at the built
 
 ```json
 {
-  "plugin": ["file:///Users/rbr/work/codex-pool/dist/index.js"]
+  "plugin": ["file:///path/to/codex-pool/dist/index.js"]
 }
 ```
 
