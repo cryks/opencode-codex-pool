@@ -107,6 +107,10 @@ function stub() {
   };
 }
 
+function body(hit: Hit) {
+  return JSON.parse(hit.body) as Record<string, unknown>;
+}
+
 function url(input: RequestInfo | URL) {
   return input instanceof Request ? input.url : input.toString();
 }
@@ -400,6 +404,363 @@ describe("createFetch", () => {
       "Bearer a-access",
       "Bearer b-access",
     ]);
+  });
+
+  test("injects priority service tier when fresh quota is under-burned", async () => {
+    store.upsert(row("fast-on", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
+  test("skips priority injection when fresh quota delta is below threshold", async () => {
+    store.upsert(row("fast-off", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 80,
+              reset_after_seconds: 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("respects caller provided service_tier", async () => {
+    store.upsert(row("tier-snake", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        service_tier: "auto",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "auto",
+    });
+  });
+
+  test("respects caller provided serviceTier", async () => {
+    store.upsert(row("tier-camel", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        serviceTier: "auto",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      serviceTier: "auto",
+    });
+  });
+
+  test("does not use stale score cache when fresh usage cannot be loaded", async () => {
+    store.upsert(row("stale-only", 0));
+    store.cacheQuota("stale-only", 0.9);
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return new Response("nope", { status: 500 });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("rebuilds the body per attempt during failover", async () => {
+    store.upsert(row("fail-a", 0, { primary: 1 }));
+    store.setPrimary("fail-a");
+    store.upsert(row("fail-b", 1));
+
+    const hits: Hit[] = [];
+    let warm = true;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer fail-a-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 79,
+                reset_after_seconds: 900,
+                limit_window_seconds: 9_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 80,
+              reset_after_seconds: 1_000,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      if (warm) {
+        return new Response("ok", { status: 200 });
+      }
+
+      if (hits.length === 1) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    warm = false;
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(hits.map((item) => body(item))).toEqual([
+      { model: "gpt-5", input: "hi", service_tier: "priority" },
+      { model: "gpt-5", input: "hi" },
+    ]);
+  });
+
+  test("keeps Request bodies unchanged across failover when they are not JSON", async () => {
+    store.upsert(row("a", 0));
+    store.upsert(row("b", 1));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      hits.push(await snap(input, init));
+      if (hits.length === 1) {
+        return new Response("slow", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const req = new Request("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: "native-body",
+      headers: { "content-type": "text/plain" },
+    });
+    const res = await run(req);
+
+    expect(res.status).toBe(200);
+    expect(hits.map((item) => item.body)).toEqual(["native-body", "native-body"]);
+  });
+
+  test("uses the most conservative delta across additional rate limits", async () => {
+    store.upsert(row("fast-conservative", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 80,
+                  reset_after_seconds: 1_000,
+                  limit_window_seconds: 9_000,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
   });
 
   test("refreshes tokens after a 401 and updates the store", async () => {

@@ -10,6 +10,7 @@
 - Retries on rate limits by cooling down the current account and moving to the next available one.
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
+- Dynamically injects `service_tier: "priority"` for under-burned requests when fresh quota data shows capacity is ahead of time.
 - Shows a compact selection toast with compared account scores and the reason the winning account was chosen.
 
 ## How it works
@@ -19,6 +20,8 @@ The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in
 At runtime, the router compares the primary account against the highest-priority available pool account. Each side gets a quota score derived from the ChatGPT usage endpoint. Higher score means the account has more weighted capacity worth spending now, so it goes first. Scores are adjusted by a conservation factor that differentiates tactical windows (e.g. 5-hour limits that recover quickly) from strategic windows (e.g. 7-day limits where early exhaustion is catastrophic). Long-recovery windows are dampened logarithmically so the router conserves them, while near-reset windows of any duration are burned aggressively to avoid waste. If a request gets a `429`, that account is placed on cooldown and the next account is tried. If a request gets a `401`, the plugin refreshes the token and retries once.
 
 When a request body contains `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for a short time. It only abandons that affinity when the alternative account is meaningfully better, blocked, or no longer available.
+
+After the account is chosen, the fetch layer may decorate that attempt with `service_tier: "priority"`. This is intentionally post-ranking: routing still uses the existing quota score, then fast-mode checks fresh usage data for the selected account only. The trigger is conservative: for every complete window in every rate limit, it computes `remaining_capacity = 1 - used_percent / 100` and `remaining_time = reset_after_seconds / limit_window_seconds`, then enables priority only when the minimum `remaining_capacity - remaining_time` is at least `0.1`. Caller-provided `service_tier` or `serviceTier` always wins, stale quota never enables fast-mode, and each retry/failover rebuilds its body from the immutable base snapshot so one account's tier choice never leaks into another attempt.
 
 ## Install
 
@@ -70,6 +73,7 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - The database runs in WAL mode so multiple opencode instances can share the same state.
 - Quota scores are cached for 60 seconds and reused across instances.
 - When quota cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When cache data is stale but still within the 24-hour fallback window, requests reuse the stale scores for ordering while warming fresh data in the background.
+- Dynamic fast-mode uses only fresh usage data already warmed inside the current fetch instance; stale shared cache is routing-only and never enables `service_tier: "priority"`.
 - Successful token refresh clears the account's cached quota score so future ranking uses fresh credentials.
 
 ## Development
@@ -105,4 +109,5 @@ test/
 - Quota ordering is conservative: blocked limits and the lowest available rate-limit window win. Long-recovery windows (over 4 hours until reset) receive logarithmic dampening capped at a 2-week horizon, making the router prefer accounts with shorter recovery times when capacity is otherwise similar.
 - Failed usage fetches do not write a negative cache entry; routing falls back to existing order and retries warming later.
 - Request bodies are snapshotted before retries so failover and token refresh can replay the same payload safely.
+- Dynamic `service_tier` injection only applies to JSON request bodies headed to the rewritten Codex endpoint, and only when the caller did not already set a tier explicitly.
 - If every available account is rate limited, the last `429` response is returned.
