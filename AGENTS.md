@@ -4,16 +4,17 @@ External opencode plugin that manages multiple ChatGPT Pro/Plus/Team Codex OAuth
 
 ## Architecture
 
-This plugin hijacks `provider: "openai"` via `auth.loader`. The built-in Codex plugin runs first (model filtering, cost zeroing), then this plugin overwrites only `fetch` via `mergeDeep`.
+This plugin hijacks `provider: "openai"` via `auth.loader`. The built-in Codex plugin runs first (model filtering, cost zeroing), then this plugin supplies a dummy OAuth `apiKey` plus a replacement `fetch` via `mergeDeep`.
 
 Core auth.json stores `type: "oauth"` for the primary account so that `isCodex = true` in opencode's `llm.ts:65`, preserving exact Codex behavior parity (`options.instructions`, system prompt, `maxOutputTokens`).
 
 ### Key design decisions
 
 - SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, and shared quota cache.
-- Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation.
+- Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and are represented in auth state through the inert shadow provider.
 - The built-in Codex `chat.headers` hook is not duplicated; it runs as-is.
 - 429 failover is strict priority-based (not round-robin) after request ordering has been decided.
+- The loader also returns `OAUTH_DUMMY_KEY` so the overridden fetch path still satisfies provider auth requirements while keeping Codex OAuth behavior active.
 
 ### Remaining-capacity routing
 
@@ -25,7 +26,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
 - When both primary and secondary windows exist within a single rate limit, the **minimum** (most conservative) window score is used. When additional rate limits exist, the minimum across all limits is taken. A zero in any limit forces the overall score to 0.
 - Quota scores are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
-- If the quota cache is stale (older than 60s) for either side, use the expired cached scores for ordering rather than defaulting to priority order, and warm the stale entries in the background. If the quota cache is cold (never fetched) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
+- If the quota cache is stale but not too old (currently up to 24 hours), use the expired cached scores for ordering and warm them in the background. If the quota cache is cold (never fetched) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
 - Once both sides have fresh cached scores, reorder requests by score: keep `core` before the pool group when `core >= pool`, otherwise move `core` behind the pool group.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's quota cache before future ranking, because the old score may have been computed from stale credentials.
@@ -40,12 +41,13 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - The sticky account is only abandoned when: (a) the alternative's quota score exceeds the sticky account's score by more than 20% (`SWITCH_MARGIN = 0.2`), (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
 - Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
 - When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
+- Request bodies are snapshotted before retries so failover and refresh retries can safely replay the same payload.
 
 ### Coexistence with built-in CodexAuthPlugin
 
 - Built-in loader guard: `if (auth.type !== "oauth") return {}` — passes when core auth is OAuth.
 - Built-in loader side effects (model filter + cost zero) are desirable and kept.
-- This plugin's loader runs after (external > internal), so `fetch` is overwritten via `mergeDeep`.
+- This plugin's loader runs after (external > internal), so `apiKey` and `fetch` are merged on top of the built-in Codex loader output.
 
 ## File structure
 
@@ -55,9 +57,12 @@ src/
   store.ts   — SQLite account/cooldown/lock/quota-cache CRUD (bun:sqlite, WAL)
   codex.ts   — Codex OAuth constants, PKCE, JWT parsing, token exchange
   oauth.ts   — Browser OAuth flow, headless device flow, token refresh
-  sync.ts    — Core auth bootstrap/import, primary mirror sync
-  fetch.ts   — Multi-account fetch with quota-aware ordering, 429 failover, token refresh, URL rewrite
+  sync.ts    — Bootstrap an existing primary OAuth auth record into SQLite
+  fetch.ts   — Multi-account fetch with quota-aware ordering, sticky affinity, 429 failover, refresh locking, and request URL rewrite
   types.ts   — Shared types and constants
+test/
+  fetch.test.ts — Routing, failover, refresh, affinity, and quota-cache behavior
+  store.test.ts — SQLite store, cooldown, lock, and shared-cache behavior
 ```
 
 ## Agent rules
@@ -79,7 +84,7 @@ Follow the opencode repo style:
 ## Testing
 
 - Run tests: `bun test` from this directory
-- Typecheck: `bunx tsc --noEmit`
+- Typecheck: `bun run typecheck`
 - Tests use real SQLite (`:memory:` or temp files), not mocks
 - Multi-instance tests use two separate `Database` connections to the same file
 
@@ -97,10 +102,13 @@ For source-based local development, pointing at `src/index.ts` still works becau
 
 ## Constants
 
-- `CODEX_OAUTH_PORT`: 1456 (differs from built-in 1455 to avoid conflict)
+- `CODEX_OAUTH_PORT`: 1455
 - `CODEX_API_ENDPOINT`: `https://chatgpt.com/backend-api/codex/responses`
 - `CODEX_ISSUER`: `https://auth.openai.com`
 - `SENTINEL_SHADOW_PROVIDER`: `openai-codex-pool-shadow` (inert auth.json record for additional accounts)
+- `OAUTH_DUMMY_KEY`: `OAUTH_DUMMY_KEY` (dummy key returned by the loader alongside the custom fetch)
+- `REFRESH_LEASE_MS`: `30_000` (SQLite refresh lock lease shared across processes)
+- Stale quota fallback horizon: `86_400_000` ms (24 hours)
 - DB default path: `~/.local/share/opencode/codex-pool.db`
 
 ## Upstream references

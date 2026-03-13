@@ -13,7 +13,7 @@
 
 ## How it works
 
-The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in Codex plugin still runs first, so model filtering and Codex-specific behavior stay intact. This plugin then replaces only the fetch layer and leaves the rest of the Codex integration alone.
+The plugin hooks `provider: "openai"` through `auth.loader`. opencode's built-in Codex plugin still runs first, so model filtering and Codex-specific behavior stay intact. This plugin then supplies a dummy OAuth API key plus a replacement fetch layer, while leaving the rest of the Codex integration alone.
 
 At runtime, the router compares the primary account against the highest-priority available pool account. Each side gets a quota score derived from the ChatGPT usage endpoint. Higher score means the account has more weighted capacity worth spending now, so it goes first. If a request gets a `429`, that account is placed on cooldown and the next account is tried. If a request gets a `401`, the plugin refreshes the token and retries once.
 
@@ -68,7 +68,7 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - SQLite is the runtime source of truth for accounts, cooldowns, refresh locks, and shared quota cache.
 - The database runs in WAL mode so multiple opencode instances can share the same state.
 - Quota scores are cached for 60 seconds and reused across instances.
-- When quota cache data is missing or stale, requests keep current priority order for the foreground request and warm cache data in the background.
+- When quota cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When cache data is stale but still within the 24-hour fallback window, requests reuse the stale scores for ordering while warming fresh data in the background.
 - Successful token refresh clears the account's cached quota score so future ranking uses fresh credentials.
 
 ## Development
@@ -86,7 +86,7 @@ Tests use real SQLite databases (`:memory:` or temporary files), including multi
 ```text
 src/
   index.ts   - plugin entry, auth hook, auth methods, loader
-  fetch.ts   - quota-aware routing, 429 failover, sticky affinity, token refresh
+  fetch.ts   - quota-aware routing, 429 failover, sticky affinity, token refresh, refresh locking
   store.ts   - SQLite CRUD for accounts, cooldowns, locks, quota cache
   oauth.ts   - browser OAuth flow, device flow, token refresh
   sync.ts    - bootstrap existing primary auth into SQLite
@@ -103,4 +103,5 @@ test/
 - Different ChatGPT accounts do not share the same server-side prompt cache, so switching accounts mid-session can increase latency.
 - Quota ordering is conservative: blocked limits and the lowest available rate-limit window win.
 - Failed usage fetches do not write a negative cache entry; routing falls back to existing order and retries warming later.
+- Request bodies are snapshotted before retries so failover and token refresh can replay the same payload safely.
 - If every available account is rate limited, the last `429` response is returned.
