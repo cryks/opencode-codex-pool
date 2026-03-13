@@ -10,10 +10,124 @@ import type { Account, TokenSet } from "./types";
 import { OAUTH_DUMMY_KEY, SENTINEL_SHADOW_PROVIDER } from "./types";
 
 let db: Store | undefined;
+const NO_POOL = "__none__";
+type ToastClient = {
+  tui: {
+    showToast(input: {
+      body: {
+        title: string;
+        message: string;
+        variant: "info" | "warning";
+        duration: number;
+      };
+    }): unknown;
+  };
+};
 
 function use() {
   if (!db) db = open();
   return db;
+}
+
+function pools(store: Store) {
+  return store.list().filter((item) => item.primary !== 1);
+}
+
+function line(account: ReturnType<Store["list"]>[number]) {
+  const name = account.label || account.email || account.id;
+  const plan = account.plan_type || "unknown";
+  return `[${plan}] ${name}`;
+}
+
+function toast(
+  client: ToastClient,
+  message: string,
+  variant: "info" | "warning",
+) {
+  return client.tui.showToast({
+    body: {
+      title: "Codex Pool",
+      message,
+      variant,
+      duration: 10_000,
+    },
+  });
+}
+
+export function edit(client: ToastClient, store = use()) {
+  const rows = pools(store);
+
+  return {
+    label: "Edit pool accounts",
+    type: "api" as const,
+    prompts: [
+      {
+        type: "select" as const,
+        key: "account",
+        message: "Select a pool account",
+        options:
+          rows.length > 0
+            ? rows.map((item) => ({
+                label: line(item),
+                value: item.id,
+                hint: item.email || item.id,
+              }))
+            : [
+                {
+                  label: "No pool accounts",
+                  value: NO_POOL,
+                  hint: "Add a pool account first",
+                },
+              ],
+      },
+      {
+        type: "select" as const,
+        key: "confirm",
+        message: "Delete this pool account?",
+        options: [
+          { label: "Cancel", value: "cancel" },
+          { label: "Delete", value: "delete", hint: "Permanent" },
+        ],
+        condition: (inputs: Record<string, string>) => inputs.account !== NO_POOL,
+      },
+    ],
+    authorize: async (inputs?: Record<string, string>) => {
+      const id = inputs?.account;
+      if (!id || id === NO_POOL) {
+        void toast(client, "No pool accounts to edit", "info");
+        return {
+          type: "success" as const,
+          provider: SENTINEL_SHADOW_PROVIDER,
+          key: "shadow",
+        };
+      }
+
+      if (inputs?.confirm !== "delete") {
+        void toast(client, "Pool account deletion cancelled", "info");
+        return {
+          type: "success" as const,
+          provider: SENTINEL_SHADOW_PROVIDER,
+          key: "shadow",
+        };
+      }
+
+      const account = store.get(id);
+      if (!account || account.primary === 1) {
+        void toast(client, "Selected account is not a removable pool account", "warning");
+        return {
+          type: "failed" as const,
+        };
+      }
+
+      store.remove(id);
+      void toast(client, `Deleted pool account: ${line(account)}`, "info");
+      return {
+        type: "success" as const,
+        provider: SENTINEL_SHADOW_PROVIDER,
+        key: "shadow",
+      };
+    },
+  };
 }
 
 function save(tokens: TokenSet, priority: number, primary: boolean) {
@@ -158,8 +272,9 @@ export default async function (input: PluginInput): Promise<Hooks> {
       methods: [
         browser("Login primary Codex account (browser)", true),
         device("Login primary Codex account (headless)", true),
-        browser("Add Codex account (browser)", false),
-        device("Add Codex account (headless)", false),
+        browser("Add pool account (browser)", false),
+        device("Add pool account (headless)", false),
+        edit(input.client),
       ],
     },
   };

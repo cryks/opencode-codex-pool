@@ -54,6 +54,21 @@ interface RankResult {
   reason?: string;
 }
 
+function order(rows: Row[], scores: Map<string, number>) {
+  return [...rows].sort((a, b) => {
+    const left = scores.get(a.id) ?? 0;
+    const right = scores.get(b.id) ?? 0;
+    if (left !== right) return right - left;
+    return a.priority - b.priority;
+  });
+}
+
+function place(rows: Row[], id: string) {
+  const item = rows.find((row) => row.id === id);
+  if (!item) return rows;
+  return [item, ...rows.filter((row) => row.id !== id)];
+}
+
 const decoder = new TextDecoder();
 const FAST_WINDOW_BASE = 18_000;
 const FAST_WINDOW_CEIL = 604_800;
@@ -643,9 +658,7 @@ async function ready(store: Store, row: Row, client: Client) {
 }
 
 function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
-  const core = rows.find((item) => item.primary === 1);
-  const pool = rows.find((item) => item.primary !== 1);
-  if (!core || !pool) {
+  if (rows.length <= 1) {
     return {
       rows,
       scores: rows.map((row) => quota(store, row)),
@@ -653,12 +666,15 @@ function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
     };
   }
 
-  const aScore = quota(store, core, true);
-  const bScore = quota(store, pool, true);
-  const list = [aScore, bScore];
-  const a = aScore.score;
-  const b = bScore.score;
-  if (a === undefined || b === undefined) {
+  if (!store.primary() && rows.every((row) => row.primary !== 1)) {
+    return {
+      rows,
+      scores: rows.map((row) => quota(store, row)),
+    };
+  }
+
+  const list = rows.map((row) => quota(store, row, true));
+  if (list.some((item) => item.score === undefined)) {
     return {
       rows,
       scores: list,
@@ -666,49 +682,52 @@ function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
     };
   }
 
-  const rest = rows.filter((item) => item.id !== core.id);
+  const scores = new Map(list.map((item) => [item.id, item.score ?? 0]));
+  const ordered = order(rows, scores);
+  const top = ordered[0];
+  const next = ordered[1];
+  if (!top) {
+    return {
+      rows,
+      scores: list,
+    };
+  }
 
-  if (affinity.id && Date.now() - affinity.at < AFFINITY_MS) {
-    const hi = Math.max(a, b, 0.001);
-    const margin = SWITCH_MARGIN * (0.5 + 0.5 * Math.min(a, b) / hi);
-    if (affinity.id === core.id && a > 0) {
-      return b > a * (1 + margin)
-        ? {
-            rows: [...rest, core],
-            scores: list,
-            reason: "higher score beat sticky core",
-          }
-        : {
-            rows: [core, ...rest],
-            scores: list,
-            reason: "sticky session kept core",
-          };
-    }
-    if (affinity.id === pool.id && b > 0) {
-      return a > b * (1 + margin)
-        ? {
-            rows: [core, ...rest],
-            scores: list,
-            reason: "higher score beat sticky pool",
-          }
-        : {
-            rows: [...rest, core],
-            scores: list,
-            reason: "sticky session kept pool",
-          };
+  if (active(affinity)) {
+    const stick = rows.find((row) => row.id === affinity.id);
+    const base = stick ? scores.get(stick.id) ?? 0 : 0;
+    const alt = stick ? ordered.find((row) => row.id !== stick.id) : undefined;
+    const best = alt ? scores.get(alt.id) ?? 0 : 0;
+
+    if (stick && alt && base > 0) {
+      const hi = Math.max(base, best, 0.001);
+      const margin = SWITCH_MARGIN * (0.5 + 0.5 * Math.min(base, best) / hi);
+      if (best > base * (1 + margin)) {
+        return {
+          rows: ordered,
+          scores: list,
+          reason: stick.primary === 1 ? "higher score beat sticky core" : "higher score beat sticky pool",
+        };
+      }
+
+      return {
+        rows: place(ordered, stick.id),
+        scores: list,
+        reason: stick.primary === 1 ? "sticky session kept core" : "sticky session kept pool",
+      };
     }
   }
 
-  if (a >= b) {
+  if ((scores.get(top.id) ?? 0) === (scores.get(next?.id ?? "") ?? -1)) {
     return {
-      rows: [core, ...rest],
+      rows: ordered,
       scores: list,
-      reason: a === b ? "tied score kept core priority" : "higher score",
+      reason: "tied score kept priority",
     };
   }
 
   return {
-    rows: [...rest, core],
+    rows: ordered,
     scores: list,
     reason: "higher score",
   };

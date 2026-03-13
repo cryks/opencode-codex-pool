@@ -12,6 +12,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 - SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, and shared quota cache.
 - Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and are represented in auth state through the inert shadow provider.
+- Auth methods expose primary login, pool-account addition, and a minimal `Edit pool accounts` manager that lists current non-primary rows and can delete a selected pool account after confirmation.
 - The built-in Codex `chat.headers` hook is not duplicated; it runs as-is.
 - 429 failover is strict priority-based (not round-robin) after request ordering has been decided.
 - The loader also returns `OAUTH_DUMMY_KEY` so the overridden fetch path still satisfies provider auth requirements while keeping Codex OAuth behavior active.
@@ -19,7 +20,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 ### Remaining-capacity routing
 
 - `core` means the primary mirrored OpenAI OAuth account (`primary_account = 1`); `pool` means every non-primary account in SQLite.
-- Routing compares `core` against the highest-priority currently available `pool` account only. Pool accounts keep their internal priority order; the strategy only decides whether `core` stays ahead of the pool group or moves behind it.
+- Routing computes a quota score for every currently available account, then reorders the whole candidate list by score. Higher score goes earlier; equal scores fall back to stored priority order.
 - The quota signal comes from `https://chatgpt.com/backend-api/wham/usage`, using the account's bearer token plus `ChatGPT-Account-Id`.
 - Each account's burn score is weighted by plan type: Pro = 6.7, Plus/Team/default = 1. The weight reflects the ~6.7× capacity ratio between Pro and Plus plans observed in OpenAI's published rate limit tables, derived from the `plan_type` field in the usage API response.
 - Per-window score is `(plan_weight * (1 - used_percent / 100) * capacity) / (pace * conservation)` once a window is active. When `limit_window_seconds` is available, `pace = max(reset_after_seconds / limit_window_seconds, 0.000001)` normalises for elapsed time within the window; otherwise `pace = reset_after_seconds` and conservation and capacity are skipped to avoid double-counting. For first-use-anchored windows that are still dormant (`used_percent = 0` and the reported reset remains effectively at the full span), the router skips conservation and pace urgency, keeping only the capacity boost so it is willing to start that clock early. Higher score means "this account has more weighted remaining capacity, so burn it first."
@@ -28,8 +29,8 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
 - When both primary and secondary windows exist within a single rate limit, the **minimum** (most conservative) window score is used. When additional rate limits exist, the minimum across all limits is taken. A zero in any limit forces the overall score to 0.
 - Quota scores are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
-- If the quota cache is stale but not too old (currently up to 24 hours), use the expired cached scores for ordering and warm them in the background. If the quota cache is cold (never fetched) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
-- Once both sides have fresh cached scores, reorder requests by score: keep `core` before the pool group when `core >= pool`, otherwise move `core` behind the pool group.
+- If the quota cache is stale but not too old (currently up to 24 hours), keep using the expired cached scores for the current foreground decision and warm them in the background. `stale` is only a background-refresh signal; it must not change the foreground request into a blocking usage fetch. If the quota cache is cold (`missing`) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
+- Once quota scores are available for the full candidate set, reorder requests by score across the entire fleet rather than only at the `core`/`pool` boundary.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's quota cache before future ranking, because the old score may have been computed from stale credentials.
 - Cooldowns and disabled-account handling still apply before quota ranking. Only `store.available()` rows participate in this comparison.
@@ -38,7 +39,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 - Fast-mode is implemented as post-ranking request decoration inside `src/fetch.ts`; it does **not** change account ordering or sticky affinity.
 - The final outbound field is OpenAI's `service_tier`, even though upstream config and provider options may use `serviceTier`.
-- The feature only considers fresh usage data already warmed in the current fetch instance. The shared SQLite stale-cache fallback remains routing-only and must never enable fast-mode.
+- Fast-mode uses the selected account's in-memory usage cache for the current attempt. This cache is separate from the shared SQLite quota score cache. Fresh usage is authoritative for 60 seconds; stale cached usage may still drive the current foreground decision while a background refresh starts. Only `missing` usage should force a synchronous warm-up before a single-account prompt attempt.
 - The trigger is conservative but span-aware: for every complete window in every rate limit, compute `remaining_capacity = 1 - used_percent / 100` and `remaining_time = reset_after_seconds / limit_window_seconds`, then subtract a required slack that depends on both the window span and how close that window is to reset. Windows at or below the 5-hour baseline (`18_000s`) require about `10%` extra slack early in the window and ease toward `7%` near reset. A 7-day window (`604_800s`) starts around `8%` and eases toward `2%`, with log-scaled interpolation for spans in between. Enable fast-mode only when the minimum `remaining_capacity - remaining_time - required_slack` across all complete windows is non-negative.
 - If any considered limit is blocked (`allowed = false` or `limit_reached = true`) or any present window is incomplete for fast-mode math, fast-mode stays off.
 - Caller-provided `service_tier` or `serviceTier` takes precedence and must not be overridden by the plugin.
@@ -51,10 +52,10 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - To preserve provider-side prompt cache warmth, the routing layer tracks which account last handled a successful response (`res.ok`) **per session** and prefers that account for subsequent requests within a 5-minute window (`AFFINITY_MS = 300_000`), aligned with OpenAI's in-memory prompt cache retention.
 - The session identity is derived from the `prompt_cache_key` field in the JSON request body (set to `sessionID` by opencode). Requests without `prompt_cache_key` receive no affinity and always use standard score-based routing.
 - Different sessions maintain independent affinity: Session A may be sticky to core while Session B is sticky to pool. This ensures that cross-session routing remains quota-aware and distributes load across accounts.
-- The sticky account is only abandoned when: (a) the alternative's quota score exceeds the sticky account's score by more than the adaptive margin, (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
+- The sticky account is only abandoned when: (a) the best currently ranked alternative's quota score exceeds the sticky account's score by more than the adaptive margin, (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
 - The adaptive margin is `SWITCH_MARGIN * (0.5 + 0.5 * min(a, b) / max(a, b))` where `SWITCH_MARGIN = 0.2`. When scores are close (both accounts similarly healthy), the margin approaches the full 20%. When scores diverge (one account is conservation-dampened), the margin shrinks toward 10%, making the router more willing to switch away from a strategically constrained account.
 - Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
-- When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
+- When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score ordering applies across every available account.
 - Request bodies are snapshotted before retries so failover and refresh retries can safely replay the same payload.
 - When the selected account changes, the pre-request selection toast includes a compact score summary for the accounts that participated in the selection decision, marks the chosen account with a `>` prefix in the `Account:`/`Accounts:` list, pads the leading `[plan]` column, trailing account column, and numeric score column for readability, includes a short reason string (for example, higher score, quota cache warming, or failover after a `429`), and shows whether fast-mode is enabled for that attempt.
 
@@ -129,9 +130,6 @@ For source-based local development, pointing at `src/index.ts` still works becau
 - Stale quota fallback horizon: `86_400_000` ms (24 hours)
 - DB default path: `~/.local/share/opencode/codex-pool.db`
 
-## Future work
-
-- Pool accounts currently keep their internal priority order and only the highest-priority pool account participates in the core-vs-pool comparison (`rank()` compares `core` against the first non-primary row only). When multiple pool accounts are supported, they should be re-ranked by quota score so the most available pool account is always the one competing against core. This would make conservation-aware scoring effective across the full fleet, not just the core/pool boundary.
 
 ## Upstream references
 

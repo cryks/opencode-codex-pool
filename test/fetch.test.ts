@@ -459,7 +459,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("toast only shows compared core and pool scores", async () => {
+  test("toast shows all accounts after multi-pool ranking", async () => {
     store.upsert(row("core-compare", 0, { primary: 1 }));
     store.setPrimary("core-compare");
     store.upsert(row("pool-first", 1));
@@ -484,7 +484,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: higher score\nAccounts:\n  [unknown] core-compare: 0.500\n> [unknown] pool-first  : 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  [unknown] core-compare: 0.500\n  [unknown] pool-first  : 0.800\n> [unknown] pool-second : 1.200",
         variant: "info",
         duration: 10_000,
       },
@@ -498,6 +498,7 @@ describe("createFetch", () => {
     store.upsert(row("pool-second-fallback", 2));
     store.cacheQuota("core-fallback", 0.9);
     store.cacheQuota("pool-first-fallback", 0.8);
+    store.cacheQuota("pool-second-fallback", 0.7);
 
     let hits = 0;
     globalThis.fetch = (async (
@@ -525,21 +526,21 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: higher score\nAccounts:\n> [unknown] core-fallback      : 0.900\n  [unknown] pool-first-fallback: 0.800",
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n> [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: core-fallback hit 429 cooldown\nAccounts:\n  [unknown] core-fallback      : 0.900\n> [unknown] pool-first-fallback: 0.800",
+          "Fast-mode disabled\nReason: core-fallback hit 429 cooldown\nAccounts:\n  [unknown] core-fallback       : 0.900\n> [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n> [unknown] pool-second-fallback: n/a",
+          "Fast-mode disabled\nReason: pool-first-fallback hit 429 cooldown\nAccounts:\n  [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n> [unknown] pool-second-fallback: 0.700",
         variant: "info",
         duration: 10_000,
       },
@@ -727,7 +728,7 @@ describe("createFetch", () => {
     });
   });
 
-  test("relaxes the 5h threshold as the window approaches reset", async () => {
+  test("stale usage keeps the current 5h request on cached fast-mode state while rewarming", async () => {
     store.upsert(row("fast-window-late", 0));
 
     const hits: Hit[] = [];
@@ -785,6 +786,18 @@ describe("createFetch", () => {
     });
 
     expect(second.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const third = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(third.status).toBe(200);
     expect(body(hits[0])).toEqual({
       model: "gpt-5",
       input: "hi",
@@ -2330,6 +2343,81 @@ describe("createFetch", () => {
       "Bearer pool-sticky-access",
     ]);
     expect(toasts).toHaveLength(1);
+  });
+
+  test("sticky affinity can keep a lower-priority pool account", async () => {
+    store.upsert(row("core-multi-sticky", 0, { primary: 1 }));
+    store.setPrimary("core-multi-sticky");
+    store.upsert(row("pool-first-multi-sticky", 1));
+    store.upsert(row("pool-second-multi-sticky", 2));
+
+    store.cacheQuota("core-multi-sticky", 0.5);
+    store.cacheQuota("pool-first-multi-sticky", 0.6);
+    store.cacheQuota("pool-second-multi-sticky", 0.8);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const body = JSON.stringify({ prompt_cache_key: "ses-multi-sticky" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    store.cacheQuota("core-multi-sticky", 0.7);
+    store.cacheQuota("pool-first-multi-sticky", 0.81);
+    store.cacheQuota("pool-second-multi-sticky", 0.8);
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer pool-second-multi-sticky-access",
+      "Bearer pool-second-multi-sticky-access",
+    ]);
+  });
+
+  test("re-ranks remaining pool accounts by score when core is unavailable", async () => {
+    store.upsert(row("core-pool-only", 0, { primary: 1 }));
+    store.setPrimary("core-pool-only");
+    store.upsert(row("pool-first-only", 1));
+    store.upsert(row("pool-second-only", 2));
+    store.cacheQuota("core-pool-only", 0.9);
+    store.cacheQuota("pool-first-only", 0.4);
+    store.cacheQuota("pool-second-only", 0.8);
+    store.setCooldown("core-pool-only", Date.now() + 60_000, 429, "rate_limited", 60_000);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits).toEqual(["Bearer pool-second-only-access"]);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  [unknown] pool-first-only : 0.400\n> [unknown] pool-second-only: 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
   });
 
   test("sticky affinity yields when alternative score exceeds margin", async () => {
