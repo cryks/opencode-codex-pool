@@ -230,6 +230,78 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("shows the selection toast before sending the prompt request", async () => {
+    store.upsert(row("core-before", 0, { primary: 1 }));
+    store.setPrimary("core-before");
+    store.upsert(row("pool-before", 1));
+    store.cacheQuota("core-before", 0.5);
+    store.cacheQuota("pool-before", 0.8);
+
+    const { client, toasts } = stub();
+    let prompt = false;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (url(input) === CODEX_API_ENDPOINT) {
+        expect(toasts).toHaveLength(1);
+        expect(toasts[0]?.message).toBe(
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n  core-before [unknown]: 0.500\n> pool-before [unknown]: 0.800",
+        );
+        prompt = true;
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(prompt).toBe(true);
+  });
+
+  test("resolves fast-mode before the prompt request toast", async () => {
+    store.upsert(row("fast-before", 0));
+
+    const { client, toasts } = stub();
+    let prompt = false;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        expect(toasts).toHaveLength(0);
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+        });
+      }
+
+      expect(url(input)).toBe(CODEX_API_ENDPOINT);
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.message).toBe(
+        "Fast-mode enabled\nReason: only available account\nAccount:\n> fast-before [unknown]: n/a",
+      );
+      expect(body(await snap(input, init)).service_tier).toBe("priority");
+      prompt = true;
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(prompt).toBe(true);
+  });
+
   test("fails over on 429 and cools down the first account", async () => {
     store.upsert(row("a", 0));
     store.upsert(row("b", 1));
@@ -295,6 +367,13 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n> core-429 [unknown]: 0.900\n  pool-429 [unknown]: 0.400",
+        variant: "info",
+        duration: 10_000,
+      },
       {
         title: "Codex Pool",
         message:
@@ -443,6 +522,20 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode disabled\nReason: higher score\nAccounts:\n> core-fallback       [unknown]: 0.900\n  pool-first-fallback [unknown]: 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
+      {
+        title: "Codex Pool",
+        message:
+          "Fast-mode disabled\nReason: core-fallback hit 429 cooldown\nAccounts:\n  core-fallback       [unknown]: 0.900\n> pool-first-fallback [unknown]: 0.800",
+        variant: "info",
+        duration: 10_000,
+      },
       {
         title: "Codex Pool",
         message:
@@ -742,7 +835,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("shows a toast when fast-mode flips for the same session", async () => {
+  test("does not flip fast-mode for the same session from stale cached usage alone", async () => {
     store.upsert(row("fast-flip", 0));
 
     let usageHits = 0;
@@ -797,17 +890,10 @@ describe("createFetch", () => {
         variant: "info",
         duration: 10_000,
       },
-      {
-        title: "Codex Pool",
-        message:
-          "Fast-mode disabled — fast-flip (pool)\nReason: fresh usage fell below threshold",
-        variant: "info",
-        duration: 10_000,
-      },
     ]);
   });
 
-  test("shows a toast when fast-mode flips from disabled to enabled for the same session", async () => {
+  test("does not flip from disabled to enabled until usage is rewarmed", async () => {
     store.upsert(row("fast-flip-up", 0));
 
     let usageHits = 0;
@@ -859,13 +945,6 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message:
           "Fast-mode disabled\nReason: only available account\nAccount:\n> fast-flip-up [unknown]: n/a",
-        variant: "info",
-        duration: 10_000,
-      },
-      {
-        title: "Codex Pool",
-        message:
-          "Fast-mode enabled — fast-flip-up (pool)\nReason: fresh usage is ahead of time",
         variant: "info",
         duration: 10_000,
       },
@@ -930,7 +1009,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode disabled\nReason: only available account\nAccount:\n> fast-expire [plus]: 4.696 cached",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> fast-expire [plus]: 4.696 cached",
         variant: "info",
         duration: 10_000,
       },

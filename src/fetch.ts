@@ -241,8 +241,39 @@ function fastLine(fast: boolean) {
 
 function fastReason(fast: boolean) {
   return fast
-    ? "fresh usage is ahead of time"
-    : "fresh usage fell below threshold";
+    ? "usage is ahead of time"
+    : "usage fell below threshold";
+}
+
+function selectionToast(
+  client: Client,
+  scores: ScoreView[],
+  reason: string,
+  pick: string,
+  fast: boolean,
+) {
+  const detail = describe(scores, reason, pick);
+  void client.tui.showToast({
+    body: {
+      title: "Codex Pool",
+      message: `${fastLine(fast)}\n${detail}`,
+      variant: "info",
+      duration: 10_000,
+    },
+  });
+}
+
+function flipToast(client: Client, row: Row, fast: boolean) {
+  void client.tui.showToast({
+    body: {
+      title: "Codex Pool",
+      message:
+        `${fastLine(fast)} - ${name(row)} (${role(row)})\n` +
+        `Reason: ${fastReason(fast)}`,
+      variant: "info",
+      duration: 10_000,
+    },
+  });
 }
 
 function listed(scores: ScoreView[], item: ScoreView) {
@@ -514,11 +545,16 @@ function refreshQuota(store: Store, row: Row) {
   return load;
 }
 
-function freshUsage(row: Row) {
+type UsageSource = "fresh" | "stale" | "missing";
+
+function cachedUsage(row: Row) {
+  return usageCache.get(row.id)?.body ?? null;
+}
+
+function usageSource(row: Row): UsageSource {
   const cached = usageCache.get(row.id);
-  if (!cached) return null;
-  if (Date.now() - cached.at >= QUOTA_CACHE_MS) return null;
-  return cached.body;
+  if (!cached) return "missing";
+  return Date.now() - cached.at < QUOTA_CACHE_MS ? "fresh" : "stale";
 }
 
 async function loadUsage(store: Store, row: Row) {
@@ -560,14 +596,13 @@ async function loadUsage(store: Store, row: Row) {
 function attempt(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
-  row: Row,
   parsed: JsonBody | undefined,
+  usage: Usage | null,
 ) : AttemptResult {
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) return { init, fast: false };
   const body = withPriority(parsed);
   if (!body) return { init, fast: false };
-  const usage = freshUsage(row);
   if (!usage || !fast(usage)) return { init, fast: false };
   return {
     init: {
@@ -788,8 +823,14 @@ export function createFetch(
         ? ordered
         : [pick(store)].filter((row) => row !== undefined);
 
-    if (candidate && list.length === 1 && !freshUsage(list[0])) {
-      await loadUsage(store, list[0]);
+    if (candidate && list.length === 1) {
+      const state = usageSource(list[0]);
+      if (state === "missing") {
+        await loadUsage(store, list[0]);
+      }
+      if (state === "stale") {
+        void loadUsage(store, list[0]);
+      }
     }
 
     let last: Response | Error | undefined;
@@ -803,12 +844,30 @@ export function createFetch(
           row = await renew(store, row, client);
         }
 
-        let used = attempt(input, snap, row, parsed);
+        const state = usageSource(row);
+        if (state === "stale") void loadUsage(store, row);
+        let used = attempt(input, snap, parsed, cachedUsage(row));
+        const sticky = active(affinity);
+        if (!sticky || affinity.id !== row.id) {
+          const scores = listed(
+            ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
+            quota(store, row),
+          );
+          selectionToast(
+            client,
+            scores,
+            note ?? ranked.reason ?? "selected account",
+            row.id,
+            used.fast,
+          );
+        } else if (affinity.fast !== undefined && affinity.fast !== used.fast) {
+          flipToast(client, row, used.fast);
+        }
         let res = await send(input, used.init, row);
 
         if (res.status === 401) {
           row = await renew(store, row, client);
-          used = attempt(input, snap, row, parsed);
+          used = attempt(input, snap, parsed, cachedUsage(row));
           res = await send(input, used.init, row);
         }
 
@@ -836,37 +895,6 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
-          const sticky = active(affinity);
-          if (!sticky || affinity.id !== row.id) {
-            const scores = listed(
-              ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
-              quota(store, row),
-            );
-            const detail = describe(
-              scores,
-              note ?? ranked.reason ?? "selected account",
-              row.id,
-            );
-            void client.tui.showToast({
-              body: {
-                title: "Codex Pool",
-                message: `${fastLine(used.fast)}\n${detail}`,
-                variant: "info",
-                duration: 10_000,
-              },
-            });
-          } else if (affinity.fast !== undefined && affinity.fast !== used.fast) {
-            void client.tui.showToast({
-              body: {
-                title: "Codex Pool",
-                message:
-                  `${fastLine(used.fast)} — ${name(row)} (${role(row)})\n` +
-                  `Reason: ${fastReason(used.fast)}`,
-                variant: "info",
-                duration: 10_000,
-              },
-            });
-          }
           if (session) {
             affinity.id = row.id;
             affinity.at = Date.now();

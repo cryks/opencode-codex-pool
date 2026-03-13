@@ -10,8 +10,8 @@
 - Retries on rate limits by cooling down the current account and moving to the next available one.
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
-- Dynamically injects `service_tier: "priority"` for under-burned requests when fresh quota data shows capacity is ahead of time.
-- Shows a compact selection toast with a `>` marker on the chosen account, whether fast-mode is enabled, aligned compared account scores, and the reason the winning account was chosen.
+- Dynamically injects `service_tier: "priority"` for under-burned requests when cached or freshly warmed usage data shows capacity is ahead of time.
+- Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, aligned compared account scores, and the reason that account was chosen.
 - Shows a separate toast when fast-mode flips for the same sticky session without an account switch.
 
 ## How it works
@@ -74,7 +74,7 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - The database runs in WAL mode so multiple opencode instances can share the same state.
 - Quota scores are cached for 60 seconds and reused across instances.
 - When quota cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When cache data is stale but still within the 24-hour fallback window, requests reuse the stale scores for ordering while warming fresh data in the background.
-- Dynamic fast-mode uses only fresh usage data already warmed inside the current fetch instance; stale shared cache is routing-only and never enables `service_tier: "priority"`.
+- Dynamic fast-mode uses the selected account's in-memory usage cache. Fresh usage stays authoritative for 60 seconds; older cached usage may still drive `service_tier: "priority"` for the current attempt while a background refresh is started.
 - Successful token refresh clears the account's cached quota score so future ranking uses fresh credentials.
 
 ## Development
