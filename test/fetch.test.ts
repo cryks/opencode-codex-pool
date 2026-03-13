@@ -1030,4 +1030,166 @@ describe("createFetch", () => {
       { url: "https://example.com/plain", auth: null, body: "native-body" },
     ]);
   });
+
+  test("sticky affinity keeps the same account when scores are close", async () => {
+    store.upsert(row("core-sticky", 0, { primary: 1 }));
+    store.setPrimary("core-sticky");
+    store.upsert(row("pool-sticky", 1));
+
+    store.cacheQuota("core-sticky", 0.5);
+    store.cacheQuota("pool-sticky", 0.55);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const body = JSON.stringify({ prompt_cache_key: "ses-sticky" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // pool wins first request (no affinity, 0.55 > 0.5), affinity set to pool
+    // flip scores so core is now slightly better
+    store.cacheQuota("core-sticky", 0.56);
+    store.cacheQuota("pool-sticky", 0.55);
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // core 0.56 does NOT exceed pool 0.55 * 1.2 = 0.66, so affinity holds
+    expect(hits).toEqual([
+      "Bearer pool-sticky-access",
+      "Bearer pool-sticky-access",
+    ]);
+  });
+
+  test("sticky affinity yields when alternative score exceeds margin", async () => {
+    store.upsert(row("core-yield", 0, { primary: 1 }));
+    store.setPrimary("core-yield");
+    store.upsert(row("pool-yield", 1));
+
+    store.cacheQuota("core-yield", 0.5);
+    store.cacheQuota("pool-yield", 0.55);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const body = JSON.stringify({ prompt_cache_key: "ses-yield" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // pool wins first request → affinity = pool
+    // core is now much better (exceeds pool * 1.2)
+    store.cacheQuota("core-yield", 0.8);
+    store.cacheQuota("pool-yield", 0.55);
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // core 0.8 > pool 0.55 * 1.2 = 0.66 → switch to core
+    expect(hits).toEqual([
+      "Bearer pool-yield-access",
+      "Bearer core-yield-access",
+    ]);
+  });
+
+  test("sticky affinity yields when current account is blocked", async () => {
+    store.upsert(row("core-block", 0, { primary: 1 }));
+    store.setPrimary("core-block");
+    store.upsert(row("pool-block", 1));
+
+    store.cacheQuota("core-block", 0.5);
+    store.cacheQuota("pool-block", 0.3);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const body = JSON.stringify({ prompt_cache_key: "ses-block" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // core wins first request → affinity = core
+    // core becomes blocked (score 0)
+    store.cacheQuota("core-block", 0);
+    store.cacheQuota("pool-block", 0.3);
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    // affinity is core but score is 0 → guard fails → standard comparison → pool wins
+    expect(hits).toEqual([
+      "Bearer core-block-access",
+      "Bearer pool-block-access",
+    ]);
+  });
+
+  test("different sessions get independent routing", async () => {
+    store.upsert(row("core-ind", 0, { primary: 1 }));
+    store.setPrimary("core-ind");
+    store.upsert(row("pool-ind", 1));
+
+    store.cacheQuota("core-ind", 0.5);
+    store.cacheQuota("pool-ind", 0.55);
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    // session A: pool wins (0.55 > 0.5), sets affinity to pool for session A
+    await run("https://api.openai.com/v1/responses", {
+      body: JSON.stringify({ prompt_cache_key: "ses-A" }),
+    });
+
+    // flip scores so core is slightly better
+    store.cacheQuota("core-ind", 0.56);
+    store.cacheQuota("pool-ind", 0.55);
+
+    // session B: no affinity for this session, standard comparison applies
+    // core 0.56 > pool 0.55 → core wins
+    await run("https://api.openai.com/v1/responses", {
+      body: JSON.stringify({ prompt_cache_key: "ses-B" }),
+    });
+
+    // session A: affinity holds on pool despite core being slightly better
+    await run("https://api.openai.com/v1/responses", {
+      body: JSON.stringify({ prompt_cache_key: "ses-A" }),
+    });
+
+    expect(hits).toEqual([
+      "Bearer pool-ind-access",
+      "Bearer core-ind-access",
+      "Bearer pool-ind-access",
+    ]);
+  });
 });

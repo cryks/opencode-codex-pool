@@ -13,7 +13,27 @@ type Client = PluginInput["client"];
 type Row = NonNullable<ReturnType<Store["primary"]>>;
 const QUOTA_CACHE_MS = 60_000;
 const STALE_QUOTA_MS = 86_400_000;
+const SWITCH_MARGIN = 0.2;
+const AFFINITY_MS = 300_000;
 const pending = new Map<string, Promise<number | null>>();
+
+interface Affinity {
+  id?: string;
+  at: number;
+}
+
+const decoder = new TextDecoder();
+
+function cacheKey(body: ArrayBuffer | null): string | undefined {
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(decoder.decode(body));
+    const key = parsed.prompt_cache_key;
+    return typeof key === "string" ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface Window {
   used_percent?: number;
@@ -222,7 +242,7 @@ async function ready(store: Store, row: Row, client: Client) {
   }
 }
 
-function rank(store: Store, rows: Row[]) {
+function rank(store: Store, rows: Row[], affinity: Affinity) {
   const core = rows.find((item) => item.primary === 1);
   const pool = rows.find((item) => item.primary !== 1);
   if (!core || !pool) return rows;
@@ -243,6 +263,16 @@ function rank(store: Store, rows: Row[]) {
   }
 
   const rest = rows.filter((item) => item.id !== core.id);
+
+  if (affinity.id && Date.now() - affinity.at < AFFINITY_MS) {
+    if (affinity.id === core.id && a > 0) {
+      return b > a * (1 + SWITCH_MARGIN) ? [...rest, core] : [core, ...rest];
+    }
+    if (affinity.id === pool.id && b > 0) {
+      return a > b * (1 + SWITCH_MARGIN) ? [core, ...rest] : [...rest, core];
+    }
+  }
+
   if (a >= b) return [core, ...rest];
   return [...rest, core];
 }
@@ -328,6 +358,9 @@ export function createFetch(
   getAuth: () => Promise<Auth>,
   client: Client,
 ) {
+  const sessions = new Map<string, Affinity>();
+  const noAffinity: Affinity = { at: 0 };
+
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const auth = await getAuth();
     if (auth.type !== "oauth") return fetch(input, init);
@@ -349,10 +382,28 @@ export function createFetch(
     }
     const snap = body ? { ...init, body } : init;
 
+    const session = cacheKey(body);
+    let affinity = noAffinity;
+    if (session) {
+      const entry = sessions.get(session);
+      if (entry) {
+        affinity = entry;
+      } else {
+        affinity = { at: 0 };
+        sessions.set(session, affinity);
+      }
+      if (sessions.size > 50) {
+        const now = Date.now();
+        for (const [k, v] of sessions) {
+          if (now - v.at >= AFFINITY_MS) sessions.delete(k);
+        }
+      }
+    }
+
     const rows = await Promise.all(
       store.available().map((item) => ready(store, item, client)),
     );
-    const ordered = rank(store, rows);
+    const ordered = rank(store, rows, affinity);
     const list =
       ordered.length > 0
         ? ordered
@@ -396,6 +447,8 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
+          affinity.id = row.id;
+          affinity.at = Date.now();
         }
 
         return res;

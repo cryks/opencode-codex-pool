@@ -20,13 +20,26 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - `core` means the primary mirrored OpenAI OAuth account (`primary_account = 1`); `pool` means every non-primary account in SQLite.
 - Routing compares `core` against the highest-priority currently available `pool` account only. Pool accounts keep their internal priority order; the strategy only decides whether `core` stays ahead of the pool group or moves behind it.
 - The quota signal comes from `https://chatgpt.com/backend-api/wham/usage`, using the account's bearer token plus `ChatGPT-Account-Id`.
-- The decision metric is a burn score computed from any available rate-limit window as `(100 - used_percent) / reset_after_seconds`. Higher score means "this account has more remaining capacity that resets sooner, so burn it first." When both primary and secondary windows exist, use the larger score.
+- Each account's burn score is weighted by plan type: Pro = 10, Plus/Team/default = 1. The weight is derived from the `plan_type` field in the usage API response.
+- Per-window score is `(plan_weight * (1 - used_percent / 100)) / pace`. When `limit_window_seconds` is available, `pace = max(reset_after_seconds / limit_window_seconds, 0.000001)` normalises for elapsed time within the window; otherwise `pace = reset_after_seconds`. Higher score means "this account has more weighted remaining capacity, so burn it first."
+- If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
+- When both primary and secondary windows exist within a single rate limit, the **minimum** (most conservative) window score is used. When additional rate limits exist, the minimum across all limits is taken. A zero in any limit forces the overall score to 0.
 - Quota scores are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
 - If the quota cache is stale (older than 60s) for either side, use the expired cached scores for ordering rather than defaulting to priority order, and warm the stale entries in the background. If the quota cache is cold (never fetched) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
 - Once both sides have fresh cached scores, reorder requests by score: keep `core` before the pool group when `core >= pool`, otherwise move `core` behind the pool group.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's quota cache before future ranking, because the old score may have been computed from stale credentials.
 - Cooldowns and disabled-account handling still apply before quota ranking. Only `store.available()` rows participate in this comparison.
+
+### Sticky affinity
+
+- Different ChatGPT accounts are isolated cache scopes on the provider side. OpenAI's server-side prompt cache is not shared between organizations/accounts, so switching accounts mid-session forces a cache miss and increases latency.
+- To preserve provider-side prompt cache warmth, the routing layer tracks which account last handled a successful response (`res.ok`) **per session** and prefers that account for subsequent requests within a 5-minute window (`AFFINITY_MS = 300_000`), aligned with OpenAI's in-memory prompt cache retention.
+- The session identity is derived from the `prompt_cache_key` field in the JSON request body (set to `sessionID` by opencode). Requests without `prompt_cache_key` receive no affinity and always use standard score-based routing.
+- Different sessions maintain independent affinity: Session A may be sticky to core while Session B is sticky to pool. This ensures that cross-session routing remains quota-aware and distributes load across accounts.
+- The sticky account is only abandoned when: (a) the alternative's quota score exceeds the sticky account's score by more than 20% (`SWITCH_MARGIN = 0.2`), (b) the sticky account's score is 0 (fully blocked), (c) the sticky account is in cooldown or disabled (already excluded by `store.available()`), or (d) the affinity window has expired.
+- Affinity state lives inside the `createFetch` closure as a `Map<string, Affinity>` keyed by `prompt_cache_key`. Expired entries are pruned when the map exceeds 50 entries, and the entire map resets when the plugin loader re-creates the fetch function.
+- When no affinity is active (first request in a session, after expiry, or no `prompt_cache_key`), the standard score comparison applies: `core >= pool` keeps core first, otherwise pool moves ahead.
 
 ### Coexistence with built-in CodexAuthPlugin
 
