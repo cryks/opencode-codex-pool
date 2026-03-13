@@ -894,6 +894,165 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("prioritizes untouched first-use windows to start their clock", async () => {
+    store.upsert(row("core-dormant", 0, { primary: 1 }));
+    store.setPrimary("core-dormant");
+    store.upsert(row("pool-active", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-dormant-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 0,
+                reset_after_seconds: 18_000,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 25,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-dormant-access",
+      "Bearer core-dormant-access",
+    ]);
+  });
+
+  test("treats zero-used windows as active once their countdown has started", async () => {
+    store.upsert(row("core-started", 0, { primary: 1 }));
+    store.setPrimary("core-started");
+    store.upsert(row("pool-started", 1));
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        const auth = new Headers(init?.headers).get("authorization");
+        if (auth === "Bearer core-started-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 0,
+                reset_after_seconds: 1_800,
+                limit_window_seconds: 604_800,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 50,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+
+    expect(store.quota("core-started", 60_000)).toBeGreaterThan(1000);
+  });
+
+  test("stops treating untouched windows as dormant after the slack threshold", async () => {
+    store.upsert(row("core-slack", 0, { primary: 1 }));
+    store.setPrimary("core-slack");
+    store.upsert(row("pool-slack", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-slack-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 0,
+                reset_after_seconds: 17_939,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 25,
+              reset_after_seconds: 14_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-slack-access",
+      "Bearer pool-slack-access",
+    ]);
+  });
+
   test("uses the minimum score across primary and secondary windows", async () => {
     store.upsert(row("core-two-window", 0, { primary: 1 }));
     store.setPrimary("core-two-window");

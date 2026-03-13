@@ -19,6 +19,7 @@ const STALE_QUOTA_MS = 86_400_000;
 const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
+const DORMANT_SLACK = 60;
 const pending = new Map<string, Promise<number | null>>();
 
 interface Affinity {
@@ -222,6 +223,25 @@ function reset(win: Window) {
   return null;
 }
 
+function conservation(secs: number) {
+  return Math.max(
+    1,
+    Math.min(CONSERVATION_CAP, 1 + Math.log(secs / CONSERVATION_REF)),
+  );
+}
+
+function dormant(win: Window, used: number) {
+  if (used > 0) return false;
+
+  const after = win.reset_after_seconds;
+  if (typeof after !== "number" || !Number.isFinite(after) || after <= 0) return false;
+
+  const span = win.limit_window_seconds;
+  if (typeof span !== "number" || !Number.isFinite(span) || span <= 0) return false;
+
+  return Math.abs(span - after) <= DORMANT_SLACK;
+}
+
 function windowScore(win: Window | undefined, plan: number) {
   if (!win) return null;
   if (typeof win.used_percent !== "number") return null;
@@ -234,12 +254,11 @@ function windowScore(win: Window | undefined, plan: number) {
 
   const span = win.limit_window_seconds;
   if (typeof span === "number" && Number.isFinite(span) && span > 0) {
-    const pace = Math.max(secs / span, 0.000001);
-    const cons = Math.max(
-      1,
-      Math.min(CONSERVATION_CAP, 1 + Math.log(secs / CONSERVATION_REF)),
-    );
     const cap = Math.sqrt(span / CAPACITY_REF);
+    if (dormant(win, used)) return plan * left * cap;
+
+    const pace = Math.max(secs / span, 0.000001);
+    const cons = conservation(secs);
     return (plan * left * cap) / (pace * cons);
   }
 
