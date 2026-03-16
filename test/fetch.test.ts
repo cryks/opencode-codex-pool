@@ -1512,6 +1512,92 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("disables an account when it stays unauthorized after refresh", async () => {
+    store.upsert(row("a", 0));
+    store.setPrimary("a");
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (url(input) === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: "next-access",
+            refresh_token: "next-refresh",
+            expires_in: 60,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      return new Response("unauthorized", {
+        status: 401,
+        statusText: "Unauthorized",
+      });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+    const item = store.get("a");
+
+    expect(res.status).toBe(401);
+    expect(item?.disabled_at).not.toBeNull();
+    expect(item?.last_error).toBe("Unauthorized");
+  });
+
+  test("does not disable an account when refresh aborts", async () => {
+    store.upsert(row("a", 0, { expires_at: Date.now() - 1_000 }));
+    store.setPrimary("a");
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (url(input) === "https://auth.openai.com/oauth/token") {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await expect(run("https://api.openai.com/v1/responses")).rejects.toThrow(
+      "The operation was aborted.",
+    );
+    expect(store.get("a")?.disabled_at).toBeNull();
+  });
+
+  test("does not disable an account when refresh aborts after a 401", async () => {
+    store.upsert(row("a", 0));
+    store.setPrimary("a");
+
+    let seen = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (url(input) === "https://auth.openai.com/oauth/token") {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+
+      if (url(input) === CODEX_API_ENDPOINT && seen === 0) {
+        seen += 1;
+        return new Response("unauthorized", {
+          status: 401,
+          statusText: "Unauthorized",
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await expect(run("https://api.openai.com/v1/responses")).rejects.toThrow(
+      "The operation was aborted.",
+    );
+    expect(store.get("a")?.disabled_at).toBeNull();
+  });
+
   test("uses fresh store tokens when another owner holds the refresh lock", async () => {
     store.upsert(
       row("a", 0, {

@@ -34,6 +34,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's quota cache before future ranking, because the old score may have been computed from stale credentials.
 - Cooldowns and disabled-account handling still apply before quota ranking. Only `store.available()` rows participate in this comparison.
+- Accounts are only disabled for durable authorization failure: a request that still returns `401` after the plugin refreshes that account and retries once. Transient request, refresh, and usage-fetch errors must not disable the account.
 
 ### Dynamic fast-mode
 
