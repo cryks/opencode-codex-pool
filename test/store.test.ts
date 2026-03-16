@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 import { open } from "../src/store";
 import type { Store } from "../src/store";
-import type { Account } from "../src/types";
+import { CAPACITY_REF } from "../src/types";
+import type { Account, Usage } from "../src/types";
 
 function row(
   id: string,
@@ -30,6 +31,30 @@ function row(
     created_at: now,
     updated_at: now,
     ...over,
+  };
+}
+
+function scored(score: number, plan = "plus"): Usage {
+  if (score === 0) {
+    return {
+      plan_type: plan,
+      rate_limit: {
+        allowed: false,
+      },
+    };
+  }
+
+  const weight = plan === "pro" ? 6.7 : 1;
+  const span = CAPACITY_REF * (score / weight) ** 2;
+  return {
+    plan_type: plan,
+    rate_limit: {
+      primary_window: {
+        used_percent: 0,
+        reset_after_seconds: span,
+        limit_window_seconds: span,
+      },
+    },
   };
 }
 
@@ -171,13 +196,13 @@ describe("store", () => {
 
     try {
       a.upsert(row("shared", 0));
-      a.cacheQuota("shared", 0.5);
+      a.cacheUsage("shared", scored(0.5));
 
-      expect(b.quota("shared", 60_000)).toBe(0.5);
+      expect(b.usage("shared", 60_000)).toEqual(scored(0.5));
 
-      a.clearQuota("shared");
+      a.clearUsage("shared");
 
-      expect(b.quota("shared", 60_000)).toBeUndefined();
+      expect(b.usage("shared", 60_000)).toBeUndefined();
     } finally {
       a.close();
       b.close();

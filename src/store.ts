@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
-import type { Account } from "./types";
+import type { Account, Usage } from "./types";
 
 const DEFAULT_PATH = join(
   homedir(),
@@ -87,10 +87,20 @@ function setup(db: Database) {
     )
   `);
 
+  const cols = db
+    .prepare<{ name: string }, []>(
+      "SELECT name FROM pragma_table_info('quota_cache')",
+    )
+    .all();
+  const names = new Set(cols.map((item) => item.name));
+  if (cols.length > 0 && (!names.has("body") || names.has("score"))) {
+    db.run("DROP TABLE quota_cache");
+  }
+
   db.run(`
     CREATE TABLE IF NOT EXISTS quota_cache (
       account_id TEXT PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
-      score REAL NOT NULL,
+      body TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     )
   `);
@@ -327,27 +337,27 @@ export function open(path?: string) {
   const release = db.prepare<unknown, { key: string; owner: string }>(
     'DELETE FROM "lock" WHERE key = $key AND owner = $owner',
   );
-  const quota = db.prepare<
-    { score: number },
+  const usage = db.prepare<
+    { body: string },
     { account_id: string; min_updated_at: number }
   >(
-    "SELECT score FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
+    "SELECT body FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
   );
   const cache = db.prepare<
     unknown,
-    { account_id: string; score: number; updated_at: number }
+    { account_id: string; body: string; updated_at: number }
   >(`
     INSERT INTO quota_cache (
       account_id,
-      score,
+      body,
       updated_at
     ) VALUES (
       $account_id,
-      $score,
+      $body,
       $updated_at
     )
     ON CONFLICT(account_id) DO UPDATE SET
-      score = excluded.score,
+      body = excluded.body,
       updated_at = excluded.updated_at
   `);
   const clearQuota = db.prepare<unknown, { account_id: string }>(
@@ -461,22 +471,29 @@ export function open(path?: string) {
       return sweep.run({ now: Date.now() }).changes;
     },
 
-    quota(id: string, maxAgeMs: number) {
-      return quota.get({
+    usage(id: string, maxAgeMs: number) {
+      const row = usage.get({
         account_id: id,
         min_updated_at: Date.now() - maxAgeMs,
-      })?.score;
+      });
+      if (!row) return undefined;
+
+      try {
+        return JSON.parse(row.body) as Usage;
+      } catch {
+        return undefined;
+      }
     },
 
-    cacheQuota(id: string, score: number, at?: number) {
+    cacheUsage(id: string, body: Usage, at?: number) {
       return cache.run({
         account_id: id,
-        score,
+        body: JSON.stringify(body),
         updated_at: at ?? Date.now(),
       }).changes > 0;
     },
 
-    clearQuota(id: string) {
+    clearUsage(id: string) {
       return clearQuota.run({ account_id: id }).changes > 0;
     },
 

@@ -33,6 +33,36 @@ export interface Lock {
   updated_at: number;
 }
 
+export interface Window {
+  used_percent?: number;
+  reset_after_seconds?: number;
+  limit_window_seconds?: number;
+}
+
+export interface Limit {
+  allowed?: boolean;
+  limit_reached?: boolean;
+  primary_window?: Window;
+  secondary_window?: Window;
+}
+
+export interface AdditionalLimit {
+  rate_limit?: Limit;
+  name?: string;
+  label?: string;
+  slug?: string;
+  type?: string;
+  plan_type?: string;
+  resource?: string;
+}
+
+export interface Usage {
+  plan_type?: string;
+  rate_limit?: Limit;
+  additional_rate_limits?: AdditionalLimit[];
+  code_review_rate_limit?: Limit;
+}
+
 export interface TokenSet {
   access_token: string;
   refresh_token: string;

@@ -6,11 +6,12 @@ import { createFetch } from "../src/fetch";
 import { open } from "../src/store";
 import type { Store } from "../src/store";
 import {
+  CAPACITY_REF,
   CODEX_API_ENDPOINT,
   CODEX_USAGE_ENDPOINT,
   REFRESH_LEASE_MS,
 } from "../src/types";
-import type { Account } from "../src/types";
+import type { Account, Usage } from "../src/types";
 
 interface Hit {
   url: string;
@@ -32,6 +33,7 @@ function fastToast(
   rule: string,
   rows: string[] = [],
   target?: string,
+  account?: string,
 ) {
   const lines = [
     `Fast-mode ${fast ? "enabled" : "disabled"}`,
@@ -40,7 +42,8 @@ function fastToast(
     `Because: ${because}`,
     "",
     "Fast:",
-    `rule    [${rule}]`,
+    ...(account ? [`account ${account}`] : []),
+    `status  ${fast ? "enabled" : `disabled (${rule})`}`,
   ];
 
   if (target) lines.push(`target  ${target}`);
@@ -106,6 +109,30 @@ function usage(input: number | Record<string, unknown>, reset?: number) {
       headers: { "content-type": "application/json" },
     },
   );
+}
+
+function scored(score: number, plan = "plus"): Usage {
+  if (score === 0) {
+    return {
+      plan_type: plan,
+      rate_limit: {
+        allowed: false,
+      },
+    };
+  }
+
+  const weight = plan === "pro" ? 6.7 : 1;
+  const span = CAPACITY_REF * (score / weight) ** 2;
+  return {
+    plan_type: plan,
+    rate_limit: {
+      primary_window: {
+        used_percent: 0,
+        reset_after_seconds: span,
+        limit_window_seconds: span,
+      },
+    },
+  };
 }
 
 function stub() {
@@ -199,8 +226,8 @@ describe("createFetch", () => {
     store.upsert(row("core-toast", 0, { primary: 1 }));
     store.setPrimary("core-toast");
     store.upsert(row("pool-toast", 1));
-    store.cacheQuota("core-toast", 0.5);
-    store.cacheQuota("pool-toast", 0.8);
+    store.cacheUsage("core-toast", scored(0.5));
+    store.cacheUsage("pool-toast", scored(0.8));
 
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -219,16 +246,52 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-toast: 0.500\n> [unknown] pool-toast: 0.800",
+          "Accounts:\n  [unknown] core-toast:\n    [7.5m] 0.500\n> [unknown] pool-toast:\n    [19.2m] 0.800",
           "higher score",
           "no data",
           [],
           "request body",
+          "pool-toast",
         ),
         variant: "info",
         duration: 10_000,
       },
     ]);
+  });
+
+  test("shows all window scores in the toast when multiple windows exist", async () => {
+    store.upsert(row("core-secondary", 0, { primary: 1 }));
+    store.setPrimary("core-secondary");
+    store.upsert(row("pool-secondary", 1));
+    store.cacheUsage("core-secondary", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 10,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 90,
+          reset_after_seconds: 604_800,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+    store.cacheUsage("pool-secondary", scored(0.8));
+
+    globalThis.fetch = (async () => {
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain("core-secondary:");
+    expect(toasts[0]?.message).toContain("[5h]");
+    expect(toasts[0]?.message).toContain("[7d]");
   });
 
   test("shows warming state when quota scores are not cached yet", async () => {
@@ -259,6 +322,7 @@ describe("createFetch", () => {
           "no data",
           [],
           "request body",
+          "core-warm",
         ),
         variant: "info",
         duration: 10_000,
@@ -270,8 +334,8 @@ describe("createFetch", () => {
     store.upsert(row("core-before", 0, { primary: 1 }));
     store.setPrimary("core-before");
     store.upsert(row("pool-before", 1));
-    store.cacheQuota("core-before", 0.5);
-    store.cacheQuota("pool-before", 0.8);
+    store.cacheUsage("core-before", scored(0.5));
+    store.cacheUsage("pool-before", scored(0.8));
 
     const { client, toasts } = stub();
     let prompt = false;
@@ -281,11 +345,12 @@ describe("createFetch", () => {
         expect(toasts[0]?.message).toBe(
           fastToast(
             false,
-            "Accounts:\n  [unknown] core-before: 0.500\n> [unknown] pool-before: 0.800",
+            "Accounts:\n  [unknown] core-before:\n    [7.5m] 0.500\n> [unknown] pool-before:\n    [19.2m] 0.800",
             "higher score",
             "no data",
             [],
             "request body",
+            "pool-before",
           ),
         );
         prompt = true;
@@ -306,6 +371,7 @@ describe("createFetch", () => {
 
     const { client, toasts } = stub();
     let prompt = false;
+    const hits: Hit[] = [];
     globalThis.fetch = (async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -333,13 +399,12 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "+ left   [**      ]  21.0%",
-              "- time   [*       ]  10.0%",
-              "+ bonus  [*       ]   6.6%",
-              "- margin [        ]   0.3%",
-              "= score  [******  ] +0.173",
+              "windows  rate.primary +0.806",
+              "= base   [******  ] +0.806",
+              "= final  [******  ] +0.806",
             ],
-            "rate.primary",
+            undefined,
+            "fast-before",
           ),
         );
       expect(body(await snap(input, init)).service_tier).toBe("priority");
@@ -397,8 +462,8 @@ describe("createFetch", () => {
     store.upsert(row("core-429", 0, { primary: 1 }));
     store.setPrimary("core-429");
     store.upsert(row("pool-429", 1));
-    store.cacheQuota("core-429", 0.9);
-    store.cacheQuota("pool-429", 0.4);
+    store.cacheUsage("core-429", scored(0.9));
+    store.cacheUsage("pool-429", scored(0.4));
 
     let hits = 0;
     globalThis.fetch = (async (
@@ -427,11 +492,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [unknown] core-429: 0.900\n  [unknown] pool-429: 0.400",
+          "Accounts:\n> [unknown] core-429:\n    [24.3m] 0.900\n  [unknown] pool-429:\n    [4.8m] 0.400",
           "higher score",
           "no data",
           [],
           "request body",
+          "core-429",
         ),
         variant: "info",
         duration: 10_000,
@@ -440,11 +506,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-429: 0.900\n> [unknown] pool-429: 0.400",
+          "Accounts:\n  [unknown] core-429:\n    [24.3m] 0.900\n> [unknown] pool-429:\n    [4.8m] 0.400",
           "core-429 hit 429 cooldown",
           "no data",
           [],
           "request body",
+          "pool-429",
         ),
         variant: "info",
         duration: 10_000,
@@ -467,8 +534,8 @@ describe("createFetch", () => {
         plan_type: "pro",
       }),
     );
-    store.cacheQuota("core-align", 123.456);
-    store.cacheQuota("pool-align", 4.567);
+    store.cacheUsage("core-align", scored(123.456));
+    store.cacheUsage("pool-align", scored(4.567));
 
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -487,11 +554,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [plus] account1@foobar.com: 123.456\n  [pro]  account2@a.com     :   4.567",
+          "Accounts:\n> [plus] account1@foobar.com:\n    [317.5d] 123.456\n  [pro]  account2@a.com:\n    [10.4h]   4.567",
           "higher score",
           "no data",
           [],
           "request body",
+          "account1@foobar.com",
         ),
         variant: "info",
         duration: 10_000,
@@ -504,8 +572,8 @@ describe("createFetch", () => {
     store.setPrimary("core-no-session");
     store.upsert(row("pool-no-session", 1));
 
-    store.cacheQuota("core-no-session", 0.5);
-    store.cacheQuota("pool-no-session", 0.55);
+    store.cacheUsage("core-no-session", scored(0.5));
+    store.cacheUsage("pool-no-session", scored(0.55));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -522,8 +590,8 @@ describe("createFetch", () => {
 
     await run("https://api.openai.com/v1/responses");
 
-    store.cacheQuota("core-no-session", 0.56);
-    store.cacheQuota("pool-no-session", 0.55);
+    store.cacheUsage("core-no-session", scored(0.56));
+    store.cacheUsage("pool-no-session", scored(0.55));
 
     await run("https://api.openai.com/v1/responses");
 
@@ -538,9 +606,9 @@ describe("createFetch", () => {
     store.setPrimary("core-compare");
     store.upsert(row("pool-first", 1));
     store.upsert(row("pool-second", 2));
-    store.cacheQuota("core-compare", 0.5);
-    store.cacheQuota("pool-first", 0.8);
-    store.cacheQuota("pool-second", 1.2);
+    store.cacheUsage("core-compare", scored(0.5));
+    store.cacheUsage("pool-first", scored(0.8));
+    store.cacheUsage("pool-second", scored(1.2));
 
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -559,11 +627,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-compare: 0.500\n  [unknown] pool-first  : 0.800\n> [unknown] pool-second : 1.200",
+          "Accounts:\n  [unknown] core-compare:\n    [7.5m] 0.500\n  [unknown] pool-first:\n    [19.2m] 0.800\n> [unknown] pool-second:\n    [43.2m] 1.200",
           "higher score",
           "no data",
           [],
           "request body",
+          "pool-second",
         ),
         variant: "info",
         duration: 10_000,
@@ -576,9 +645,9 @@ describe("createFetch", () => {
     store.setPrimary("core-fallback");
     store.upsert(row("pool-first-fallback", 1));
     store.upsert(row("pool-second-fallback", 2));
-    store.cacheQuota("core-fallback", 0.9);
-    store.cacheQuota("pool-first-fallback", 0.8);
-    store.cacheQuota("pool-second-fallback", 0.7);
+    store.cacheUsage("core-fallback", scored(0.9));
+    store.cacheUsage("pool-first-fallback", scored(0.8));
+    store.cacheUsage("pool-second-fallback", scored(0.7));
 
     let hits = 0;
     globalThis.fetch = (async (
@@ -607,11 +676,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
+          "Accounts:\n> [unknown] core-fallback:\n    [24.3m] 0.900\n  [unknown] pool-first-fallback:\n    [19.2m] 0.800\n  [unknown] pool-second-fallback:\n    [14.7m] 0.700",
           "higher score",
           "no data",
           [],
           "request body",
+          "core-fallback",
         ),
         variant: "info",
         duration: 10_000,
@@ -620,11 +690,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-fallback       : 0.900\n> [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
+          "Accounts:\n  [unknown] core-fallback:\n    [24.3m] 0.900\n> [unknown] pool-first-fallback:\n    [19.2m] 0.800\n  [unknown] pool-second-fallback:\n    [14.7m] 0.700",
           "core-fallback hit 429 cooldown",
           "no data",
           [],
           "request body",
+          "pool-first-fallback",
         ),
         variant: "info",
         duration: 10_000,
@@ -633,11 +704,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n> [unknown] pool-second-fallback: 0.700",
+          "Accounts:\n  [unknown] core-fallback:\n    [24.3m] 0.900\n  [unknown] pool-first-fallback:\n    [19.2m] 0.800\n> [unknown] pool-second-fallback:\n    [14.7m] 0.700",
           "pool-first-fallback hit 429 cooldown",
           "no data",
           [],
           "request body",
+          "pool-second-fallback",
         ),
         variant: "info",
         duration: 10_000,
@@ -826,7 +898,7 @@ describe("createFetch", () => {
     expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
   });
 
-  test("allows 7d windows to enable fast-mode with less slack at the same progress", async () => {
+  test("keeps 7d windows aligned with the same score-normalized fast-mode gate", async () => {
     store.upsert(row("fast-window-7d", 0));
 
     const hits: Hit[] = [];
@@ -868,11 +940,7 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({
-      model: "gpt-5",
-      input: "hi",
-      service_tier: "priority",
-    });
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
   });
 
   test("stale usage keeps the current request on cached fast-mode state while rewarming", async () => {
@@ -955,6 +1023,7 @@ describe("createFetch", () => {
   test("shows fast-mode enabled in the account switch toast", async () => {
     store.upsert(row("fast-toast", 0));
 
+    const hits: Hit[] = [];
     globalThis.fetch = (async (
       input: RequestInfo | URL,
       init?: RequestInit,
@@ -972,6 +1041,7 @@ describe("createFetch", () => {
         });
       }
 
+      hits.push(await snap(input, init));
       return new Response(await new Response(init?.body).text(), { status: 200 });
     }) as typeof fetch;
 
@@ -990,21 +1060,182 @@ describe("createFetch", () => {
         message: fastToast(
           true,
           "Account:\n> [unknown] fast-toast: n/a",
-          "only available account",
-          "ok",
-          [
-            "+ left   [**      ]  21.0%",
-            "- time   [*       ]  10.0%",
-            "+ bonus  [*       ]   6.6%",
-            "- margin [        ]   0.3%",
-            "= score  [******  ] +0.173",
-          ],
-          "rate.primary",
+            "only available account",
+            "ok",
+            [
+              "windows  rate.primary +0.806",
+              "= base   [******  ] +0.806",
+              "= final  [******  ] +0.806",
+            ],
+          undefined,
+          "fast-toast",
         ),
         variant: "info",
         duration: 10_000,
       },
     ]);
+  });
+
+  test("attributes multi-account fast-mode details to the selected account", async () => {
+    store.upsert(row("core-fast-pick", 0, { primary: 1, plan_type: "plus" }));
+    store.setPrimary("core-fast-pick");
+    store.upsert(row("pool-fast-pick", 1, { plan_type: "plus" }));
+    store.cacheUsage("core-fast-pick", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 98,
+          reset_after_seconds: 900,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+    store.cacheUsage("pool-fast-pick", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 79,
+          reset_after_seconds: 900,
+          limit_window_seconds: 9_000,
+        },
+      },
+    });
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message: fastToast(
+          true,
+          "Accounts:\n  [plus] core-fast-pick:\n    [5h] 1.231\n> [plus] pool-fast-pick:\n    [2.5h] 5.006",
+            "higher score",
+            "ok",
+            [
+              "windows  rate.primary +0.806",
+              "= base   [******  ] +0.806",
+              "= final  [******  ] +0.806",
+            ],
+          undefined,
+          "pool-fast-pick",
+        ),
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
+  test("does not let untouched additional windows veto an active fast-mode decision", async () => {
+    store.upsert(row("fast-extra", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 0,
+                  reset_after_seconds: 604_800,
+                  limit_window_seconds: 604_800,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    const message = toasts[0]?.message ?? "";
+    expect(message).toContain("Fast-mode enabled");
+    expect(message).toContain("status  enabled");
+    expect(message).toContain("windows  rate.primary");
+    expect(message).not.toContain("state   untouched");
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
+  test("ignores additional rate limits when fast-mode has no rate_limit windows", async () => {
+    store.upsert(row("fast-extra-only", 0));
+
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 0,
+                  reset_after_seconds: 604_800,
+                  limit_window_seconds: 604_800,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    const message = toasts[0]?.message ?? "";
+    expect(message).toContain("status  disabled (no data)");
+    expect(message).toContain("target  rate limit");
+    expect(message).not.toContain("additional 1 primary");
   });
 
   test("does not flip fast-mode for the same session from stale cached usage alone", async () => {
@@ -1060,16 +1291,15 @@ describe("createFetch", () => {
         message: fastToast(
           true,
           "Account:\n> [unknown] fast-flip: n/a",
-          "only available account",
-          "ok",
-          [
-            "+ left   [**      ]  21.0%",
-            "- time   [        ]   5.0%",
-            "+ bonus  [*       ]   7.0%",
-            "- margin [        ]   0.1%",
-            "= score  [******* ] +0.229",
-          ],
-          "rate.primary",
+            "only available account",
+            "ok",
+            [
+              "windows  rate.primary +1.527",
+              "= base   [********] +1.527",
+              "= final  [********] +1.527",
+            ],
+          undefined,
+          "fast-flip",
         ),
         variant: "info",
         duration: 10_000,
@@ -1130,22 +1360,143 @@ describe("createFetch", () => {
         message: fastToast(
           false,
           "Account:\n> [unknown] fast-flip-up: n/a",
-          "only available account",
-          "low cap",
-          [
-            "+ left   [        ]   2.0%",
-            "- time   [        ]   5.0%",
-            "+ bonus  [        ]   0.7%",
-            "- margin [        ]   0.1%",
-            "= score  [-       ] -0.024",
-            "need cap [        ]   3.0%",
-          ],
+            "only available account",
+            "low cap",
+            [
+              "need cap [*       ] 0.030",
+            ],
           "rate.primary",
+          "fast-flip-up",
         ),
         variant: "info",
         duration: 10_000,
       },
     ]);
+  });
+
+  test("keeps fast-mode on for the same sticky account inside the hysteresis band", async () => {
+    store.upsert(row("fast-band", 0));
+
+    let usageHits = 0;
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 79 : 19,
+              reset_after_seconds: usageHits === 1 ? 900 : 14_400,
+              limit_window_seconds: usageHits === 1 ? 9_000 : 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-band",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 60_001;
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    await Bun.sleep(0);
+
+    hits.length = 0;
+    const third = await run("https://api.openai.com/v1/responses", request);
+    expect(third.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      prompt_cache_key: "session-fast-band",
+      service_tier: "priority",
+    });
+    expect(toasts).toHaveLength(1);
+  });
+
+  test("flips fast-mode off for the same sticky account after fresh profile pressure drops below the off threshold", async () => {
+    store.upsert(row("fast-band-off", 0));
+
+    let usageHits = 0;
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: usageHits === 1 ? 79 : 81,
+              reset_after_seconds: usageHits === 1 ? 900 : 3_600,
+              limit_window_seconds: usageHits === 1 ? 9_000 : 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-band-off",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 60_001;
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    await Bun.sleep(0);
+
+    hits.length = 0;
+    const third = await run("https://api.openai.com/v1/responses", request);
+    expect(third.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      prompt_cache_key: "session-fast-band-off",
+    });
+    expect(toasts).toHaveLength(2);
+    expect(toasts[1]?.message).toContain("Fast-mode disabled");
+    expect(toasts[1]?.message).toContain("status  disabled (low score)");
   });
 
   test("does not show a fast-mode flip toast after affinity expires", async () => {
@@ -1201,16 +1552,15 @@ describe("createFetch", () => {
         message: fastToast(
           true,
           "Account:\n> [unknown] fast-expire: n/a",
-          "only available account",
-          "ok",
-          [
-            "+ left   [**      ]  21.0%",
-            "- time   [        ]   5.0%",
-            "+ bonus  [*       ]   7.0%",
-            "- margin [        ]   0.1%",
-            "= score  [******* ] +0.229",
-          ],
-          "rate.primary",
+            "only available account",
+            "ok",
+            [
+              "windows  rate.primary +1.527",
+              "= base   [********] +1.527",
+              "= final  [********] +1.527",
+            ],
+          undefined,
+          "fast-expire",
         ),
         variant: "info",
         duration: 10_000,
@@ -1219,17 +1569,16 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           true,
-          "Account:\n> [plus] fast-expire: 14.557 cached",
-          "only available account",
-          "ok",
-          [
-            "+ left   [**      ]  21.0%",
-            "- time   [        ]   5.0%",
-            "+ bonus  [*       ]   7.0%",
-            "- margin [        ]   0.1%",
-            "= score  [******* ] +0.229",
-          ],
-          "rate.primary",
+          "Account:\n> [plus] fast-expire:\n    [5h] 14.557 cached",
+            "only available account",
+            "ok",
+            [
+              "windows  rate.primary +1.527",
+              "= base   [********] +1.527",
+              "= final  [********] +1.527",
+            ],
+          undefined,
+          "fast-expire",
         ),
         variant: "info",
         duration: 10_000,
@@ -1348,7 +1697,7 @@ describe("createFetch", () => {
 
   test("does not use stale score cache when fresh usage cannot be loaded", async () => {
     store.upsert(row("stale-only", 0));
-    store.cacheQuota("stale-only", 0.9);
+    store.cacheUsage("stale-only", scored(0.9));
 
     const hits: Hit[] = [];
     globalThis.fetch = (async (
@@ -1489,7 +1838,7 @@ describe("createFetch", () => {
     expect(hits.map((item) => item.body)).toEqual(["native-body", "native-body"]);
   });
 
-  test("uses the most conservative fast-mode score across additional rate limits", async () => {
+  test("lets additional rate limits veto fast-mode when another window is ahead", async () => {
     store.upsert(row("fast-conservative", 0));
 
     const hits: Hit[] = [];
@@ -1525,7 +1874,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -1543,9 +1892,65 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    const message = toasts[toasts.length - 1]?.message ?? "";
+    expect(message).toContain("status  disabled (low cap)");
+    expect(message).toContain("target  additional 1 primary (5h)");
   });
 
-  test("skips priority injection when a considered window is incomplete", async () => {
+  test("lets additional active windows lower the profile score without hitting the cap floor", async () => {
+    store.upsert(row("fast-gap", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 79,
+              reset_after_seconds: 900,
+              limit_window_seconds: 9_000,
+            },
+          },
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 81,
+                  reset_after_seconds: 3_600,
+                  limit_window_seconds: 18_000,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    const message = toasts[0]?.message ?? "";
+    expect(message).toContain("status  disabled (low score)");
+    expect(message).toContain("windows  rate.primary +0.806  additional 1 primary (5h) -0.060");
+    expect(message).toContain("- drift");
+    expect(message).toContain("- bias");
+  });
+
+  test("ignores incomplete additional rate limits when rate_limit is complete", async () => {
     store.upsert(row("fast-incomplete", 0));
 
     const hits: Hit[] = [];
@@ -1597,7 +2002,11 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
   });
 
   test("refreshes tokens after a 401 and updates the store", async () => {
@@ -1840,8 +2249,8 @@ describe("createFetch", () => {
     store.upsert(row("core-fast", 0, { primary: 1 }));
     store.setPrimary("core-fast");
     store.upsert(row("pool-fast", 1));
-    store.cacheQuota("core-fast", (100 - 80) / 7_200);
-    store.cacheQuota("pool-fast", (100 - 20) / 600);
+    store.cacheUsage("core-fast", scored((100 - 80) / 7_200));
+    store.cacheUsage("pool-fast", scored((100 - 20) / 600));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -1867,8 +2276,8 @@ describe("createFetch", () => {
     store.upsert(row("core-soon", 0, { primary: 1 }));
     store.setPrimary("core-soon");
     store.upsert(row("pool-later", 1));
-    store.cacheQuota("core-soon", (100 - 20) / 600);
-    store.cacheQuota("pool-later", (100 - 80) / 7_200);
+    store.cacheUsage("core-soon", scored((100 - 20) / 600));
+    store.cacheUsage("pool-later", scored((100 - 80) / 7_200));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2300,6 +2709,7 @@ describe("createFetch", () => {
     store.setPrimary("core-started");
     store.upsert(row("pool-started", 1));
 
+    const hits: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (url(input) === CODEX_USAGE_ENDPOINT) {
         const auth = new Headers(init?.headers).get("authorization");
@@ -2320,14 +2730,16 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 50,
-              reset_after_seconds: 14_400,
-              limit_window_seconds: 18_000,
+              used_percent: 0,
+              reset_after_seconds: 18_000_000,
+              limit_window_seconds: 18_000_000,
             },
           },
         });
       }
 
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
@@ -2336,8 +2748,13 @@ describe("createFetch", () => {
 
     await run("https://api.openai.com/v1/responses");
     await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
 
-    expect(store.quota("core-started", 60_000)).toBeGreaterThan(1000);
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-started-access",
+      "Bearer core-started-access",
+    ]);
   });
 
   test("stops treating untouched windows as dormant after the slack threshold", async () => {
@@ -2459,7 +2876,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("uses the minimum score across additional rate limits", async () => {
+  test("ignores additional rate limits when ranking accounts", async () => {
     store.upsert(row("core-additional", 0, { primary: 1 }));
     store.setPrimary("core-additional");
     store.upsert(row("pool-plain", 1));
@@ -2523,7 +2940,7 @@ describe("createFetch", () => {
     expect(second.status).toBe(200);
     expect(hits).toEqual([
       "Bearer core-additional-access",
-      "Bearer pool-plain-access",
+      "Bearer core-additional-access",
     ]);
   });
 
@@ -2573,8 +2990,8 @@ describe("createFetch", () => {
     store.upsert(row("pool-stale", 1));
 
     const staleAt = Date.now() - 120_000;
-    store.cacheQuota("core-stale", 0.5, staleAt);
-    store.cacheQuota("pool-stale", 0.8, staleAt);
+    store.cacheUsage("core-stale", scored(0.5), staleAt);
+    store.cacheUsage("pool-stale", scored(0.8), staleAt);
 
     let scans = 0;
     const hits: string[] = [];
@@ -2615,8 +3032,8 @@ describe("createFetch", () => {
     store.upsert(row("core-refresh", 0, { primary: 1 }));
     store.setPrimary("core-refresh");
     store.upsert(row("pool-refresh", 1));
-    store.cacheQuota("core-refresh", 1);
-    store.cacheQuota("pool-refresh", 0.1);
+    store.cacheUsage("core-refresh", scored(1));
+    store.cacheUsage("pool-refresh", scored(0.1));
 
     let scans = 0;
     const hits: string[] = [];
@@ -2670,7 +3087,7 @@ describe("createFetch", () => {
     const run = createFetch(store, async () => auth(), client);
 
     const first = await run("https://api.openai.com/v1/responses");
-    expect(store.quota("core-refresh", 60_000)).toBeUndefined();
+    expect(store.usage("core-refresh", 60_000)).toBeUndefined();
 
     const second = await run("https://api.openai.com/v1/responses");
     await Bun.sleep(0);
@@ -2720,8 +3137,8 @@ describe("createFetch", () => {
     store.setPrimary("core-sticky");
     store.upsert(row("pool-sticky", 1));
 
-    store.cacheQuota("core-sticky", 0.5);
-    store.cacheQuota("pool-sticky", 0.55);
+    store.cacheUsage("core-sticky", scored(0.5));
+    store.cacheUsage("pool-sticky", scored(0.55));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2741,8 +3158,8 @@ describe("createFetch", () => {
 
     // pool wins first request (no affinity, 0.55 > 0.5), affinity set to pool
     // flip scores so core is now slightly better
-    store.cacheQuota("core-sticky", 0.56);
-    store.cacheQuota("pool-sticky", 0.55);
+    store.cacheUsage("core-sticky", scored(0.56));
+    store.cacheUsage("pool-sticky", scored(0.55));
 
     await run("https://api.openai.com/v1/responses", { body });
 
@@ -2760,9 +3177,9 @@ describe("createFetch", () => {
     store.upsert(row("pool-first-multi-sticky", 1));
     store.upsert(row("pool-second-multi-sticky", 2));
 
-    store.cacheQuota("core-multi-sticky", 0.5);
-    store.cacheQuota("pool-first-multi-sticky", 0.6);
-    store.cacheQuota("pool-second-multi-sticky", 0.8);
+    store.cacheUsage("core-multi-sticky", scored(0.5));
+    store.cacheUsage("pool-first-multi-sticky", scored(0.6));
+    store.cacheUsage("pool-second-multi-sticky", scored(0.8));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2780,9 +3197,9 @@ describe("createFetch", () => {
 
     await run("https://api.openai.com/v1/responses", { body });
 
-    store.cacheQuota("core-multi-sticky", 0.7);
-    store.cacheQuota("pool-first-multi-sticky", 0.81);
-    store.cacheQuota("pool-second-multi-sticky", 0.8);
+    store.cacheUsage("core-multi-sticky", scored(0.7));
+    store.cacheUsage("pool-first-multi-sticky", scored(0.81));
+    store.cacheUsage("pool-second-multi-sticky", scored(0.8));
 
     await run("https://api.openai.com/v1/responses", { body });
 
@@ -2797,9 +3214,9 @@ describe("createFetch", () => {
     store.setPrimary("core-pool-only");
     store.upsert(row("pool-first-only", 1));
     store.upsert(row("pool-second-only", 2));
-    store.cacheQuota("core-pool-only", 0.9);
-    store.cacheQuota("pool-first-only", 0.4);
-    store.cacheQuota("pool-second-only", 0.8);
+    store.cacheUsage("core-pool-only", scored(0.9));
+    store.cacheUsage("pool-first-only", scored(0.4));
+    store.cacheUsage("pool-second-only", scored(0.8));
     store.setCooldown("core-pool-only", Date.now() + 60_000, 429, "rate_limited", 60_000);
 
     const hits: string[] = [];
@@ -2823,11 +3240,12 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] pool-first-only : 0.400\n> [unknown] pool-second-only: 0.800",
+          "Accounts:\n  [unknown] pool-first-only:\n    [4.8m] 0.400\n> [unknown] pool-second-only:\n    [19.2m] 0.800",
           "higher score",
           "no data",
           [],
           "request body",
+          "pool-second-only",
         ),
         variant: "info",
         duration: 10_000,
@@ -2840,8 +3258,8 @@ describe("createFetch", () => {
     store.setPrimary("core-yield");
     store.upsert(row("pool-yield", 1));
 
-    store.cacheQuota("core-yield", 0.5);
-    store.cacheQuota("pool-yield", 0.55);
+    store.cacheUsage("core-yield", scored(0.5));
+    store.cacheUsage("pool-yield", scored(0.55));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2861,8 +3279,8 @@ describe("createFetch", () => {
 
     // pool wins first request → affinity = pool
     // core is now much better (exceeds pool * 1.2)
-    store.cacheQuota("core-yield", 0.8);
-    store.cacheQuota("pool-yield", 0.55);
+    store.cacheUsage("core-yield", scored(0.8));
+    store.cacheUsage("pool-yield", scored(0.55));
 
     await run("https://api.openai.com/v1/responses", { body });
 
@@ -2878,8 +3296,8 @@ describe("createFetch", () => {
     store.setPrimary("core-block");
     store.upsert(row("pool-block", 1));
 
-    store.cacheQuota("core-block", 0.5);
-    store.cacheQuota("pool-block", 0.3);
+    store.cacheUsage("core-block", scored(0.5));
+    store.cacheUsage("pool-block", scored(0.3));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2899,8 +3317,8 @@ describe("createFetch", () => {
 
     // core wins first request → affinity = core
     // core becomes blocked (score 0)
-    store.cacheQuota("core-block", 0);
-    store.cacheQuota("pool-block", 0.3);
+    store.cacheUsage("core-block", scored(0));
+    store.cacheUsage("pool-block", scored(0.3));
 
     await run("https://api.openai.com/v1/responses", { body });
 
@@ -2916,8 +3334,8 @@ describe("createFetch", () => {
     store.setPrimary("core-ind");
     store.upsert(row("pool-ind", 1));
 
-    store.cacheQuota("core-ind", 0.5);
-    store.cacheQuota("pool-ind", 0.55);
+    store.cacheUsage("core-ind", scored(0.5));
+    store.cacheUsage("pool-ind", scored(0.55));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -2938,8 +3356,8 @@ describe("createFetch", () => {
     });
 
     // flip scores so core is slightly better
-    store.cacheQuota("core-ind", 0.56);
-    store.cacheQuota("pool-ind", 0.55);
+    store.cacheUsage("core-ind", scored(0.56));
+    store.cacheUsage("pool-ind", scored(0.55));
 
     // session B: no affinity for this session, standard comparison applies
     // core 0.56 > pool 0.55 → core wins
@@ -3135,8 +3553,8 @@ describe("createFetch", () => {
     store.setPrimary("core-am");
     store.upsert(row("pool-am", 1));
 
-    store.cacheQuota("core-am", 0.1);
-    store.cacheQuota("pool-am", 0.12);
+    store.cacheUsage("core-am", scored(0.1));
+    store.cacheUsage("pool-am", scored(0.12));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -3158,8 +3576,8 @@ describe("createFetch", () => {
     // flip: core 0.12, pool 0.10
     // fixed 0.2 margin: 0.12 > 0.10 * 1.2 = 0.12 → false (not strict >)
     // adaptive margin: balance = 0.833, margin ≈ 0.183 → 0.12 > 0.1183 → true
-    store.cacheQuota("core-am", 0.12);
-    store.cacheQuota("pool-am", 0.1);
+    store.cacheUsage("core-am", scored(0.12));
+    store.cacheUsage("pool-am", scored(0.1));
 
     await run("https://api.openai.com/v1/responses", { body });
 

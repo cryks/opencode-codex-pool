@@ -10,6 +10,10 @@ import {
   CONSERVATION_REF,
   CONSERVATION_HORIZON,
   CAPACITY_REF,
+  type AdditionalLimit,
+  type Limit,
+  type Usage,
+  type Window,
 } from "./types";
 
 type Client = PluginInput["client"];
@@ -20,7 +24,6 @@ const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
 const DORMANT_SLACK = 60;
-const pending = new Map<string, Promise<number | null>>();
 
 interface Affinity {
   id?: string;
@@ -39,6 +42,12 @@ function active(affinity: Affinity) {
 }
 
 type ScoreSource = "fresh" | "stale" | "missing";
+type UsageSource = "fresh" | "stale" | "missing";
+
+interface UsageView {
+  body?: Usage;
+  source: UsageSource;
+}
 
 interface ScoreView {
   id: string;
@@ -47,6 +56,14 @@ interface ScoreView {
   role: "core" | "pool";
   score?: number;
   source: ScoreSource;
+  deciding?: string;
+  windows: ScoreWindow[];
+}
+
+interface ScoreWindow {
+  label: string;
+  name: string;
+  score: number;
 }
 
 interface RankResult {
@@ -71,13 +88,11 @@ function place(rows: Row[], id: string) {
 }
 
 const decoder = new TextDecoder();
-const FAST_WINDOW_BASE = 18_000;
-const FAST_WINDOW_CEIL = 604_800;
-const FAST_SLACK_SHORT = 0.1;
-const FAST_SLACK_LONG = 0.08;
-const FAST_SLACK_GAMMA = 1.5;
-const FAST_BONUS = 0.35;
 const FAST_MIN_LEFT = 0.03;
+const FAST_SCORE_ON = 0.05;
+const FAST_SCORE_OFF = -0.02;
+const FAST_SPREAD = 0.35;
+const FAST_GAP = 0.25;
 const HEALTH_RANGE = 0.2;
 const HEALTH_BONUS = 0.12;
 const HEALTH_PENALTY = 0.18;
@@ -93,48 +108,29 @@ function cacheKey(body: ArrayBuffer | null): string | undefined {
   }
 }
 
-interface Window {
-  used_percent?: number;
-  reset_after_seconds?: number;
-  limit_window_seconds?: number;
-}
-
 interface ReadyWindow {
   used_percent: number;
   reset_after_seconds: number;
   limit_window_seconds: number;
 }
 
-interface Limit {
-  allowed?: boolean;
-  limit_reached?: boolean;
-  primary_window?: Window;
-  secondary_window?: Window;
-}
-
-interface Usage {
-  plan_type?: string;
-  rate_limit?: Limit;
-  additional_rate_limits?: Array<{
-    rate_limit?: Limit;
-  }>;
-}
-
-interface UsageHit {
-  at: number;
-  body: Usage;
+interface ScoreHit {
+  score: number | null;
+  label?: string;
+  windows: ScoreWindow[];
 }
 
 type FastWindowState = "scored" | "floor" | "blocked" | "incomplete";
 
 interface FastWindowView {
   label: string;
+  target: string;
   state: FastWindowState;
   score?: number;
+  raw?: number;
+  base?: number;
   left?: number;
-  time?: number;
-  bonus?: number;
-  slack?: number;
+  dormant?: boolean;
 }
 
 interface FastView {
@@ -144,6 +140,20 @@ interface FastView {
   score?: number;
   detail?: FastWindowView;
   windows: FastWindowView[];
+  scored?: FastWindowView[];
+  floor?: number;
+  spread?: number;
+  gap?: number;
+}
+
+interface FastProfile {
+  floor: FastWindowView;
+  spread: number;
+  gap: number;
+  score: number;
+  spread_cost: number;
+  gap_cost: number;
+  scored: FastWindowView[];
 }
 
 interface JsonBody {
@@ -151,7 +161,6 @@ interface JsonBody {
   tier: boolean;
 }
 
-const usageCache = new Map<string, UsageHit>();
 const loadingUsage = new Map<string, Promise<Usage | null>>();
 
 function clamp(value: number, min: number, max: number) {
@@ -223,43 +232,57 @@ function plan(row: Row) {
   return row.plan_type ?? "unknown";
 }
 
-function quota(store: Store, row: Row, warm = false): ScoreView {
-  const fresh = store.quota(row.id, QUOTA_CACHE_MS);
+function usageView(store: Store, row: Row, warm = false): UsageView {
+  const fresh = store.usage(row.id, QUOTA_CACHE_MS);
   if (fresh !== undefined) {
     return {
-      id: row.id,
-      name: name(row),
-      plan: plan(row),
-      role: role(row),
-      score: fresh,
+      body: fresh,
       source: "fresh",
     };
   }
 
-  const stale = store.quota(row.id, STALE_QUOTA_MS);
-  if (warm) void refreshQuota(store, row);
+  const stale = store.usage(row.id, STALE_QUOTA_MS);
+  if (warm) void loadUsage(store, row);
   if (stale !== undefined) {
     return {
-      id: row.id,
-      name: name(row),
-      plan: plan(row),
-      role: role(row),
-      score: stale,
+      body: stale,
       source: "stale",
     };
   }
+
+  return {
+    source: "missing",
+  };
+}
+
+function quota(store: Store, row: Row, warm = false): ScoreView {
+  const usage = usageView(store, row, warm);
+  const hit = usage.body ? score(usage.body) : null;
 
   return {
     id: row.id,
     name: name(row),
     plan: plan(row),
     role: role(row),
-    source: "missing",
+    score: hit?.score ?? undefined,
+    source: usage.source,
+    deciding: hit?.label,
+    windows: hit?.windows ?? [],
   };
 }
 
-function value(item: ScoreView, scoreWidth: number) {
-  if (item.source === "missing") return "n/a";
+function text(item: ScoreView, scoreWidth: number) {
+  if (item.windows.length > 0) {
+    const values = item.windows.map(
+      (win) => `[${win.name}] ${win.score.toFixed(3).padStart(scoreWidth)}`,
+    );
+    if (item.source === "stale") values.push("cached");
+    return values.join(" ");
+  }
+
+  if (item.score === undefined) {
+    return item.source === "stale" ? "n/a cached" : "n/a";
+  }
 
   const tags = [];
   if (item.score === 0) tags.push("blocked");
@@ -271,30 +294,33 @@ function value(item: ScoreView, scoreWidth: number) {
 function line(
   item: ScoreView,
   pick: string,
-  nameWidth: number,
   planWidth: number,
   scoreWidth: number,
 ) {
   const head = item.id === pick ? ">" : " ";
-  const label = item.name.padEnd(nameWidth);
   const tier = `[${item.plan}]`.padEnd(planWidth + 2);
-  return `${head} ${tier} ${label}: ${value(item, scoreWidth)}`;
+  const prefix = `${head} ${tier} ${item.name}:`;
+  if (item.windows.length === 0) return `${prefix} ${text(item, scoreWidth)}`;
+  return `${prefix}\n    ${text(item, scoreWidth)}`;
 }
 
 function describe(scores: ScoreView[], reason: string, pick: string) {
-  const nameWidth = Math.max(...scores.map((item) => item.name.length));
   const planWidth = Math.max(...scores.map((item) => item.plan.length));
   const scoreWidth = Math.max(
     0,
-    ...scores.map((item) =>
-      item.source === "missing" ? 0 : (item.score?.toFixed(3) ?? "n/a").length,
-    ),
+    ...scores.flatMap((item) => {
+      if (item.windows.length > 0) {
+        return item.windows.map((win) => win.score.toFixed(3).length);
+      }
+
+      return item.source === "missing"
+        ? [0]
+        : [(item.score?.toFixed(3) ?? "n/a").length];
+    }),
   );
   const lines = [
     scores.length === 1 ? "Account:" : "Accounts:",
-    ...scores.map((item) =>
-      line(item, pick, nameWidth, planWidth, scoreWidth),
-    ),
+    ...scores.map((item) => line(item, pick, planWidth, scoreWidth)),
     `Because: ${reason}`,
   ];
   return lines.join("\n");
@@ -304,46 +330,99 @@ function fastLine(fast: boolean) {
   return `Fast-mode ${fast ? "enabled" : "disabled"}`;
 }
 
-function percent(value: number) {
-  return `${(value * 100).toFixed(1)}%`;
-}
-
 function bar(value: number, max = 1, fill = "*") {
   const width = 8;
-  const size = Math.round(clamp(value / max, 0, 1) * width);
+  const scaled = clamp(value / max, 0, 1);
+  const size = scaled === 0 ? 0 : Math.max(1, Math.round(scaled * width));
   return `[${fill.repeat(size)}${" ".repeat(width - size)}]`;
 }
 
-function metric(op: string, label: string, value: number, max = 1, fill = "*") {
-  return `${op} ${label.padEnd(6)} ${bar(value, max, fill)} ${percent(value).padStart(6)}`;
+function metric(op: string, label: string, value: number, max = 1) {
+  const fill = value >= 0 ? "*" : "-";
+  return `${op} ${label.padEnd(6)} ${bar(Math.abs(value), max, fill)} ${(value >= 0 ? "+" : "") + value.toFixed(3)}`;
 }
 
-function fastNote(info: FastView) {
-  const lines = ["Fast:", `rule    [${info.rule}]`];
-  if (info.target) lines.push(`target  ${info.target}`);
-
-  const item = info.detail;
-  if (item && typeof item.left === "number" && typeof item.time === "number") {
-    lines.push(metric("+", "left", item.left));
-    lines.push(metric("-", "time", item.time));
+function span(secs: number) {
+  if (secs >= 86_400) {
+    const value = secs / 86_400;
+    return `${Number.isInteger(value) ? value : value.toFixed(1).replace(/\.0$/, "")}d`;
   }
 
-  if (item && typeof item.bonus === "number") {
-    lines.push(metric("+", "bonus", item.bonus));
+  if (secs >= 3_600) {
+    const value = secs / 3_600;
+    return `${Number.isInteger(value) ? value : value.toFixed(1).replace(/\.0$/, "")}h`;
   }
 
-  if (item && typeof item.slack === "number") {
-    lines.push(metric("-", "margin", item.slack));
+  if (secs >= 60) {
+    const value = secs / 60;
+    return `${Number.isInteger(value) ? value : value.toFixed(1).replace(/\.0$/, "")}m`;
   }
 
-  if (typeof info.score === "number") {
-    lines.push(
-      `= score  ${bar(Math.abs(info.score), 0.25, info.score >= 0 ? "*" : "-")} ${info.score >= 0 ? "+" : ""}${info.score.toFixed(3)}`,
+  return `${secs.toFixed(0)}s`;
+}
+
+function fastTarget(label: string, win?: Window) {
+  const extra = /^extra(\d+)\.(primary|secondary)$/.exec(label);
+  if (!extra) return label;
+
+  const item = readyWindow(win);
+  const hint = item ? ` (${span(item.limit_window_seconds)})` : "";
+  return `additional ${extra[1]} ${extra[2]}${hint}`;
+}
+
+function windowName(label: string, win?: Window) {
+  const item = readyWindow(win);
+  if (!item) return label;
+  return span(item.limit_window_seconds);
+}
+
+function dedupeWindows(items: ScoreWindow[]) {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+  }
+
+  return items.map((item) => {
+    if ((counts.get(item.name) ?? 0) < 2) return item;
+    const side = item.label.split(".").at(-1);
+    if (!side) return item;
+    return {
+      ...item,
+      name: `${item.name} ${side}`,
+    } satisfies ScoreWindow;
+  });
+}
+
+function fastLimitTarget(label: string) {
+  const extra = /^extra(\d+)$/.exec(label);
+  if (!extra) return label;
+  return `additional ${extra[1]}`;
+}
+
+function fastNote(info: FastView, account?: string) {
+  const lines = ["Fast:"];
+  if (account) lines.push(`account ${account}`);
+  const state = info.fast ? "enabled" : `disabled (${info.rule})`;
+  lines.push(`status  ${state}`);
+  if (info.scored && info.scored.length > 0) {
+    const items = info.scored.map(
+      (item) => `${item.target} ${(item.score ?? 0) >= 0 ? "+" : ""}${(item.score ?? 0).toFixed(3)}`,
     );
+    lines.push(`windows  ${items.join("  ")}`);
+  } else if (info.target) {
+    lines.push(`target  ${info.target}`);
   }
 
-  if (item?.state === "floor") {
-    lines.push(`need cap ${bar(FAST_MIN_LEFT)} ${percent(FAST_MIN_LEFT).padStart(6)}`);
+  if (typeof info.floor === "number") lines.push(metric("=", "base", info.floor, 1));
+  if (typeof info.spread === "number" && info.spread > 0) {
+    lines.push(metric("-", "drift", info.spread, 1));
+  }
+  if (typeof info.gap === "number" && info.gap > 0) {
+    lines.push(metric("-", "bias", info.gap, 1));
+  }
+  if (typeof info.score === "number") lines.push(metric("=", "final", info.score, 1));
+  if (info.detail?.state === "floor") {
+    lines.push(`need cap ${bar(FAST_MIN_LEFT)} ${FAST_MIN_LEFT.toFixed(3)}`);
   }
 
   return lines.join("\n");
@@ -382,6 +461,10 @@ function flipToast(client: Client, score: ScoreView, fast: boolean, note: string
 
 function listed(scores: ScoreView[], item: ScoreView) {
   return scores.some((score) => score.id === item.id) ? scores : [...scores, item];
+}
+
+function deciding(scores: ScoreView[], row: Row) {
+  return scores.find((item) => item.id === row.id)?.deciding;
 }
 
 function rewrite(input: RequestInfo | URL) {
@@ -492,143 +575,162 @@ function readyWindow(win?: Window): ReadyWindow | null | undefined {
   };
 }
 
-function fastSpan(win: ReadyWindow) {
-  const span = win.limit_window_seconds;
-  if (span <= FAST_WINDOW_BASE) return 0;
-
-  const base = Math.log(span / FAST_WINDOW_BASE);
-  const ceil = Math.log(FAST_WINDOW_CEIL / FAST_WINDOW_BASE);
-  return ceil > 0 ? clamp(base / ceil, 0, 1) : 0;
+function balanced(win: ReadyWindow): Window {
+  const time = clamp(win.reset_after_seconds / win.limit_window_seconds, 0, 1);
+  return {
+    used_percent: (1 - time) * 100,
+    reset_after_seconds: win.reset_after_seconds,
+    limit_window_seconds: win.limit_window_seconds,
+  } satisfies Window;
 }
 
-function fastSlack(win?: Window) {
-  const item = readyWindow(win);
-  if (item === undefined) return undefined;
-  if (item === null) return null;
-
-  const span = fastSpan(item);
-  const base =
-    FAST_SLACK_SHORT - (FAST_SLACK_SHORT - FAST_SLACK_LONG) * span;
-  const time = clamp(
-    item.reset_after_seconds / item.limit_window_seconds,
-    0,
-    1,
-  );
-  return base * time ** FAST_SLACK_GAMMA;
+function normalized(win: ReadyWindow, plan: number) {
+  const raw = windowScore(win, plan);
+  if (typeof raw !== "number" || raw <= 0) return null;
+  const base = windowScore(balanced(win), plan);
+  if (typeof base !== "number" || base <= 0) return null;
+  return {
+    raw,
+    base,
+    score: Math.log(raw / base),
+  };
 }
 
-function fastScore(win?: Window) {
-  const item = readyWindow(win);
-  if (item === undefined) return undefined;
-  if (item === null) return null;
-  const left = 1 - clamp(item.used_percent, 0, 100) / 100;
-  const time = clamp(
-    item.reset_after_seconds / item.limit_window_seconds,
-    0,
-    1,
-  );
-  if (left < FAST_MIN_LEFT) return -1;
-  const slack = fastSlack(item);
-  if (typeof slack !== "number") return null;
-  return left - time + FAST_BONUS * (1 - time) * left - slack;
-}
-
-function inspectFastWindow(
-  label: string,
-  win?: Window,
-): FastWindowView | undefined {
+function inspectFastWindow(label: string, win?: Window, plan = 1): FastWindowView | undefined {
   if (!win) return undefined;
 
   const item = readyWindow(win);
   if (item === null) {
     return {
       label,
+      target: fastTarget(label, win),
       state: "incomplete",
     } satisfies FastWindowView;
   }
 
   if (item === undefined) return undefined;
-  const left = 1 - clamp(item.used_percent, 0, 100) / 100;
-  const time = clamp(
-    item.reset_after_seconds / item.limit_window_seconds,
-    0,
-    1,
-  );
+  const used = clamp(item.used_percent, 0, 100);
+  const left = 1 - used / 100;
+  const idle = dormant(item, used);
   if (left < FAST_MIN_LEFT) {
-    const bonus = FAST_BONUS * (1 - time) * left;
-    const slack = fastSlack(item);
     return {
       label,
+      target: fastTarget(label, win),
       state: "floor",
-      score: left - time + bonus - (typeof slack === "number" ? slack : 0),
       left,
-      time,
-      bonus,
-      slack: typeof slack === "number" ? slack : undefined,
+      dormant: idle,
     } satisfies FastWindowView;
   }
 
-  const slack = fastSlack(item);
-  if (typeof slack !== "number") {
+  const hit = normalized(item, plan);
+  if (!hit) {
     return {
       label,
+      target: fastTarget(label, win),
       state: "incomplete",
     } satisfies FastWindowView;
   }
 
-  const bonus = FAST_BONUS * (1 - time) * left;
   return {
     label,
+    target: fastTarget(label, win),
     state: "scored",
-    score: left - time + bonus - slack,
+    score: hit.score,
+    raw: hit.raw,
+    base: hit.base,
     left,
-    time,
-    bonus,
-    slack,
+    dormant: idle,
   } satisfies FastWindowView;
 }
 
-function inspectFastLimit(label: string, limit?: Limit): FastWindowView[] {
+function inspectFastLimit(label: string, limit: Limit | undefined, plan: number): FastWindowView[] {
   if (!limit) return [];
   if (blocked(limit)) {
     return [
       {
         label,
+        target: fastLimitTarget(label),
         state: "blocked",
       } satisfies FastWindowView,
     ];
   }
 
   const rows: FastWindowView[] = [];
-  const primary = inspectFastWindow(`${label}.primary`, limit.primary_window);
+  const primary = inspectFastWindow(`${label}.primary`, limit.primary_window, plan);
   if (primary) rows.push(primary);
-  const secondary = inspectFastWindow(`${label}.secondary`, limit.secondary_window);
+  const secondary = inspectFastWindow(`${label}.secondary`, limit.secondary_window, plan);
   if (secondary) rows.push(secondary);
   return rows;
 }
 
-function inspectFast(usage: Usage): FastView {
-  const windows: FastWindowView[] = inspectFastLimit("rate", usage.rate_limit);
-  for (const [i, item] of (usage.additional_rate_limits ?? []).entries()) {
-    windows.push(...inspectFastLimit(`extra${i + 1}`, item.rate_limit));
+function inspectFastUsage(usage: Usage) {
+  const plan = weight(usage.plan_type);
+  const rows = [...inspectFastLimit("rate", usage.rate_limit, plan)];
+  usage.additional_rate_limits?.forEach((item, index) => {
+    rows.push(...inspectFastLimit(`extra${index + 1}`, item.rate_limit, plan));
+  });
+  return rows;
+}
+
+function profile(
+  windows: FastWindowView[],
+  deciding?: string,
+): FastProfile | null {
+  const active = windows.filter((item) => !item.dormant);
+  const pool = active.length > 0 ? active : windows;
+  const scored = pool.filter((item): item is FastWindowView & { score: number } => item.state === "scored" && typeof item.score === "number");
+  if (scored.length === 0) return null;
+
+  const floor = scored.reduce((best, item) => (item.score < best.score ? item : best));
+  const top = scored.reduce((best, item) => (item.score > best.score ? item : best));
+  const focus = scored.find((item) => item.label === deciding) ?? top;
+  const spread = top.score - floor.score;
+  const debt = Math.max(0, -floor.score);
+  const gap = debt > 0 ? Math.max(0, focus.score - floor.score) : 0;
+  const spread_cost = FAST_SPREAD * debt * spread;
+  const gap_cost = FAST_GAP * debt * gap;
+  return {
+    floor,
+    spread,
+    gap,
+    score: floor.score - spread_cost - gap_cost,
+    spread_cost,
+    gap_cost,
+    scored,
+  } satisfies FastProfile;
+}
+
+function inspectFast(usage: Usage, deciding?: string, previous?: boolean): FastView {
+  const windows = inspectFastUsage(usage);
+  const rate = windows.filter((item) => item.label.startsWith("rate."));
+
+  if (rate.length === 0) {
+    return {
+      fast: false,
+      rule: "no data",
+      target: "rate limit",
+      windows,
+    };
   }
 
   const blocked = windows.find((item) => item.state === "blocked");
   if (blocked) {
     return {
       fast: false,
-      rule: "rate limit",
-      target: blocked.label,
+      rule: "blocked",
+      target: blocked.target,
       windows,
     };
   }
 
-  const incomplete = windows.find((item) => item.state === "incomplete");
+  const incomplete = windows.find((item) =>
+    item.label.startsWith("rate.") && item.state === "incomplete",
+  );
   if (incomplete) {
     return {
       fast: false,
       rule: "no data",
-      target: incomplete.label,
+      target: incomplete.target,
       windows,
     };
   }
@@ -638,15 +740,14 @@ function inspectFast(usage: Usage): FastView {
     return {
       fast: false,
       rule: "low cap",
-      target: floor.label,
-      score: floor.score,
+      target: floor.target,
       detail: floor,
       windows,
     };
   }
 
-  const scored = windows.filter((item) => item.state === "scored");
-  if (scored.length === 0) {
+  const hit = profile(windows, deciding);
+  if (!hit) {
     return {
       fast: false,
       rule: "no data",
@@ -654,33 +755,17 @@ function inspectFast(usage: Usage): FastView {
     };
   }
 
-  const [first, ...rest] = scored;
-  const min = rest.reduce(
-    (best, item) =>
-      (item.score ?? Number.POSITIVE_INFINITY) <
-      (best.score ?? Number.POSITIVE_INFINITY)
-        ? item
-        : best,
-    first,
-  );
-  const minScore = min.score ?? Number.NaN;
-  if (minScore < 0) {
-    return {
-      fast: false,
-      rule: "low score",
-      target: min.label,
-      score: minScore,
-      detail: min,
-      windows,
-    };
-  }
-
+  const gate = previous ? FAST_SCORE_OFF : FAST_SCORE_ON;
+  const fast = hit.score >= gate;
   return {
-    fast: true,
-    rule: "ok",
-    target: min.label,
-    score: minScore,
-    detail: min,
+    fast,
+    rule: fast ? "ok" : "low score",
+    score: hit.score,
+    detail: hit.floor,
+    scored: hit.scored,
+    floor: hit.floor.score,
+    spread: hit.spread_cost,
+    gap: hit.gap_cost,
     windows,
   };
 }
@@ -689,6 +774,8 @@ function explainFast(
   input: RequestInfo | URL,
   parsed: JsonBody | undefined,
   usage: Usage | null,
+  deciding?: string,
+  previous?: boolean,
 ): FastView {
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
@@ -727,25 +814,7 @@ function explainFast(
     };
   }
 
-  return inspectFast(usage);
-}
-
-function limitFastScore(limit?: Limit) {
-  if (!limit) return undefined;
-  if (blocked(limit)) return null;
-
-  const list = [
-    fastScore(limit.primary_window),
-    fastScore(limit.secondary_window),
-  ];
-  if (list.includes(null)) return null;
-  const values = list.filter((item): item is number => item !== undefined);
-  if (values.length === 0) return null;
-  return Math.min(...values);
-}
-
-function fast(usage: Usage) {
-  return inspectFast(usage).fast;
+  return inspectFast(usage, deciding, previous);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -788,80 +857,71 @@ async function snapshot(input: RequestInfo | URL, init?: RequestInit) {
   return await new Response(src).arrayBuffer();
 }
 
-function limitScore(limit: Limit | undefined, plan: number) {
+function limitScore(label: string, limit: Limit | undefined, plan: number): ScoreHit | null {
   if (!limit) return null;
-  if (blocked(limit)) return 0;
+  if (blocked(limit)) return { score: 0, label, windows: [] };
 
-  const list = [
-    windowScore(limit.primary_window, plan),
-    windowScore(limit.secondary_window, plan),
-  ].filter((item): item is number => item !== null);
+  const list = dedupeWindows(
+    [
+      {
+        score: windowScore(limit.primary_window, plan),
+        label: `${label}.primary`,
+        name: windowName(`${label}.primary`, limit.primary_window),
+      },
+      {
+        score: windowScore(limit.secondary_window, plan),
+        label: `${label}.secondary`,
+        name: windowName(`${label}.secondary`, limit.secondary_window),
+      },
+    ].filter(
+      (item): item is ScoreWindow => item.score !== null,
+    ),
+  );
 
   if (list.length === 0) return null;
-  return Math.min(...list);
+
+  const best = list.reduce((win, item) => (item.score < win.score ? item : win));
+  return {
+    score: best.score,
+    label: best.label,
+    windows: list,
+  };
 }
 
-function score(body: Usage) {
+function score(body: Usage): ScoreHit | null {
   const plan = weight(body.plan_type);
-  const list = [limitScore(body.rate_limit, plan)];
+  const list = [limitScore("rate", body.rate_limit, plan)];
 
-  for (const item of body.additional_rate_limits ?? []) {
-    list.push(limitScore(item.rate_limit, plan));
-  }
-
-  if (list.includes(0)) return 0;
+  const blocked = list.find((item) => item?.score === 0);
+  if (blocked) return blocked;
 
   const values = list.filter(
-    (item): item is number => item !== null,
+    (item): item is ScoreHit => item !== null,
   );
 
   if (values.length === 0) return null;
-  return Math.min(...values);
+  return values.reduce((best, item) =>
+    (item.score ?? Number.POSITIVE_INFINITY) <
+    (best.score ?? Number.POSITIVE_INFINITY)
+      ? item
+      : best,
+  );
 }
 
-function refreshQuota(store: Store, row: Row) {
-  if (!row.chatgpt_account_id) return null;
-
-  const hit = store.quota(row.id, QUOTA_CACHE_MS);
-  if (hit !== undefined) return hit;
-
-  const held = pending.get(row.id);
-  if (held) return held;
-
-  const load = (async () => {
-    try {
-      const usage = await loadUsage(store, row);
-      const value = usage ? score(usage) : null;
-      return value;
-    } catch {
-      return null;
-    } finally {
-      pending.delete(row.id);
-    }
-  })();
-
-  pending.set(row.id, load);
-  return load;
+function cachedUsage(store: Store, row: Row) {
+  return usageView(store, row).body ?? null;
 }
 
-type UsageSource = "fresh" | "stale" | "missing";
-
-function cachedUsage(row: Row) {
-  return usageCache.get(row.id)?.body ?? null;
-}
-
-function usageSource(row: Row): UsageSource {
-  const cached = usageCache.get(row.id);
-  if (!cached) return "missing";
-  return Date.now() - cached.at < QUOTA_CACHE_MS ? "fresh" : "stale";
+function usageSource(store: Store, row: Row): UsageSource {
+  return usageView(store, row).source;
 }
 
 async function loadUsage(store: Store, row: Row) {
   const account = row.chatgpt_account_id;
   if (!account) return null;
 
-  const cached = usageCache.get(row.id);
-  if (cached && Date.now() - cached.at < QUOTA_CACHE_MS) return cached.body;
+  const cached = store.usage(row.id, QUOTA_CACHE_MS);
+  if (cached !== undefined) return cached;
 
   const held = loadingUsage.get(row.id);
   if (held) return held;
@@ -876,10 +936,8 @@ async function loadUsage(store: Store, row: Row) {
       const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
       if (!res.ok) return null;
       const usage = ((await res.json()) as Usage) ?? {};
-      const value = score(usage);
-      if (value !== null) store.cacheQuota(row.id, value);
+      store.cacheUsage(row.id, usage);
       if (usage.plan_type) store.updatePlanType(row.id, usage.plan_type);
-      usageCache.set(row.id, { at: Date.now(), body: usage });
       return usage;
     } catch {
       return null;
@@ -897,20 +955,27 @@ function attempt(
   init: RequestInit | undefined,
   parsed: JsonBody | undefined,
   usage: Usage | null,
+  account?: string,
+  deciding?: string,
+  previous?: boolean,
 ) : AttemptResult {
-  const info = explainFast(input, parsed, usage);
+  const info = explainFast(input, parsed, usage, deciding, previous);
   const url = rewrite(input).toString();
-  if (url !== CODEX_API_ENDPOINT) return { init, fast: false, note: fastNote(info) };
+  if (url !== CODEX_API_ENDPOINT) {
+    return { init, fast: false, note: fastNote(info, account) };
+  }
   const body = withPriority(parsed);
-  if (!body) return { init, fast: false, note: fastNote(info) };
-  if (!usage || !info.fast) return { init, fast: false, note: fastNote(info) };
+  if (!body) return { init, fast: false, note: fastNote(info, account) };
+  if (!usage || !info.fast) {
+    return { init, fast: false, note: fastNote(info, account) };
+  }
   return {
     init: {
       ...init,
       body: new TextEncoder().encode(JSON.stringify(body)).buffer,
     } satisfies RequestInit,
     fast: true,
-    note: fastNote(info),
+    note: fastNote(info, account),
   };
 }
 
@@ -1031,9 +1096,7 @@ async function renew(
       tokens.refresh_token,
       expires,
     );
-    store.clearQuota(row.id);
-    pending.delete(row.id);
-    usageCache.delete(row.id);
+    store.clearUsage(row.id);
     loadingUsage.delete(row.id);
     store.enable(row.id);
     store.clearCooldown(row.id);
@@ -1129,7 +1192,7 @@ export function createFetch(
         : [pick(store)].filter((row) => row !== undefined);
 
     if (candidate && list.length === 1) {
-      const state = usageSource(list[0]);
+      const state = usageSource(store, list[0]);
       if (state === "missing") {
         await loadUsage(store, list[0]);
       }
@@ -1149,14 +1212,23 @@ export function createFetch(
           row = await renew(store, row, client);
         }
 
-        const state = usageSource(row);
+        const state = usageSource(store, row);
         if (state === "stale") void loadUsage(store, row);
-        let used = attempt(input, snap, parsed, cachedUsage(row));
+        const current = quota(store, row);
         const sticky = active(affinity);
+        let used = attempt(
+          input,
+          snap,
+          parsed,
+          cachedUsage(store, row),
+          name(row),
+          deciding(ranked.scores, row) ?? current.deciding,
+          sticky && affinity.id === row.id ? affinity.fast : undefined,
+        );
         if (!sticky || affinity.id !== row.id) {
           const scores = listed(
             ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
-            quota(store, row),
+            current,
           );
           selectionToast(
             client,
@@ -1167,13 +1239,22 @@ export function createFetch(
             used.note,
           );
         } else if (affinity.fast !== undefined && affinity.fast !== used.fast) {
-          flipToast(client, quota(store, row), used.fast, used.note);
+          flipToast(client, current, used.fast, used.note);
         }
         let res = await send(input, used.init, row);
 
         if (res.status === 401) {
           row = await renew(store, row, client);
-          used = attempt(input, snap, parsed, cachedUsage(row));
+          const fresh = quota(store, row);
+          used = attempt(
+            input,
+            snap,
+            parsed,
+            cachedUsage(store, row),
+            name(row),
+            fresh.deciding,
+            sticky && affinity.id === row.id ? affinity.fast : undefined,
+          );
           res = await send(input, used.init, row);
         }
 
