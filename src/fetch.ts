@@ -269,11 +269,11 @@ function describe(scores: ScoreView[], reason: string, pick: string) {
     ),
   );
   const lines = [
-    `Reason: ${reason}`,
     scores.length === 1 ? "Account:" : "Accounts:",
     ...scores.map((item) =>
       line(item, pick, nameWidth, planWidth, scoreWidth),
     ),
+    `Because: ${reason}`,
   ];
   return lines.join("\n");
 }
@@ -299,7 +299,7 @@ function selectionToast(
   void client.tui.showToast({
     body: {
       title: "Codex Pool",
-      message: `${fastLine(fast)}\n${detail}`,
+      message: `${fastLine(fast)}\n\n${detail}`,
       variant: "info",
       duration: 10_000,
     },
