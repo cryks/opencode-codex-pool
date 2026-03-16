@@ -292,8 +292,55 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain("core-secondary:");
-    expect(toasts[0]?.message).toContain("[5h]");
-    expect(toasts[0]?.message).toContain("[7d]");
+    expect(toasts[0]?.message).toContain("[guard 5h]");
+    expect(toasts[0]?.message).toContain("[main 7d]");
+  });
+
+  test("uses the longest rate window for ranking and applies the shorter window as a guard", async () => {
+    store.upsert(row("core-guard-rank", 0, { primary: 1 }));
+    store.setPrimary("core-guard-rank");
+    store.upsert(row("pool-steady-rank", 1));
+    store.cacheUsage("core-guard-rank", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 90,
+          reset_after_seconds: 15_000,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 10,
+          reset_after_seconds: 483_840,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+    store.cacheUsage("pool-steady-rank", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 35,
+          reset_after_seconds: 302_400,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits[0]?.auth).toBe("Bearer pool-steady-rank-access");
+    expect(toasts[0]?.message).toContain("[main 7d]");
+    expect(toasts[0]?.message).toContain("[guard 5h]");
+    expect(toasts[0]?.message).toContain("core-guard-rank:");
   });
 
   test("shows warming state when quota scores are not cached yet", async () => {
@@ -401,7 +448,7 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "windows  rate.primary +0.806",
+              "main    rate.primary +0.806",
               "= base   [******  ] +0.806",
               "= final  [******  ] +0.806",
             ],
@@ -1065,7 +1112,7 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "windows  rate.primary +0.806",
+              "main    rate.primary +0.806",
               "= base   [******  ] +0.806",
               "= final  [******  ] +0.806",
             ],
@@ -1076,6 +1123,48 @@ describe("createFetch", () => {
         duration: 10_000,
       },
     ]);
+  });
+
+  test("uses the longest rate window as the fast-mode base and shorter windows as guards", async () => {
+    store.upsert(row("fast-main-guard", 0));
+    store.cacheUsage("fast-main-guard", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 79,
+          reset_after_seconds: 60_480,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    expect(toasts[0]?.message).toContain("main    rate.secondary +0.806");
+    expect(toasts[0]?.message).toContain("guards  rate.primary +0.000");
   });
 
   test("attributes multi-account fast-mode details to the selected account", async () => {
@@ -1128,7 +1217,7 @@ describe("createFetch", () => {
             "higher score",
             "ok",
             [
-              "windows  rate.primary +0.806",
+              "main    rate.primary +0.806",
               "= base   [******  ] +0.806",
               "= final  [******  ] +0.806",
             ],
@@ -1189,7 +1278,7 @@ describe("createFetch", () => {
     const message = toasts[0]?.message ?? "";
     expect(message).toContain("Fast-mode enabled");
     expect(message).toContain("status  enabled");
-    expect(message).toContain("windows  rate.primary");
+    expect(message).toContain("main    rate.primary");
     expect(message).not.toContain("state   untouched");
     expect(body(hits[0])).toEqual({
       model: "gpt-5",
@@ -1296,7 +1385,7 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "windows  rate.primary +1.527",
+              "main    rate.primary +1.527",
               "= base   [********] +1.527",
               "= final  [********] +1.527",
             ],
@@ -1557,7 +1646,7 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "windows  rate.primary +1.527",
+              "main    rate.primary +1.527",
               "= base   [********] +1.527",
               "= final  [********] +1.527",
             ],
@@ -1575,7 +1664,7 @@ describe("createFetch", () => {
             "only available account",
             "ok",
             [
-              "windows  rate.primary +1.527",
+              "main    rate.primary +1.527",
               "= base   [********] +1.527",
               "= final  [********] +1.527",
             ],
@@ -1840,7 +1929,7 @@ describe("createFetch", () => {
     expect(hits.map((item) => item.body)).toEqual(["native-body", "native-body"]);
   });
 
-  test("lets additional rate limits veto fast-mode when another window is ahead", async () => {
+  test("ignores additional rate limits even when an additional window is exhausted", async () => {
     store.upsert(row("fast-conservative", 0));
 
     const hits: Hit[] = [];
@@ -1893,13 +1982,18 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
     const message = toasts[toasts.length - 1]?.message ?? "";
-    expect(message).toContain("status  disabled (low cap)");
-    expect(message).toContain("target  additional 1 primary (5h)");
+    expect(message).toContain("status  enabled");
+    expect(message).toContain("main    rate.primary +0.806");
+    expect(message).not.toContain("additional 1 primary");
   });
 
-  test("lets additional active windows lower the profile score without hitting the cap floor", async () => {
+  test("does not show additional rate limits in the fast-mode guard summary", async () => {
     store.upsert(row("fast-gap", 0));
 
     const hits: Hit[] = [];
@@ -1944,12 +2038,16 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("status  disabled (low score)");
-    expect(message).toContain("windows  rate.primary +0.806  additional 1 primary (5h) -0.060");
-    expect(message).toContain("- drift");
-    expect(message).toContain("- bias");
+    expect(message).toContain("status  enabled");
+    expect(message).toContain("main    rate.primary +0.806");
+    expect(message).not.toContain("additional 1 primary");
+    expect(message).not.toContain("guards  ");
   });
 
   test("ignores incomplete additional rate limits when rate_limit is complete", async () => {
@@ -2816,7 +2914,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("uses the minimum score across primary and secondary windows", async () => {
+  test("lets the longest rate window drive ranking even when the short window is healthy", async () => {
     store.upsert(row("core-two-window", 0, { primary: 1 }));
     store.setPrimary("core-two-window");
     store.upsert(row("pool-mid", 1));
