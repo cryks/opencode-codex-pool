@@ -11,8 +11,8 @@
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
 - Dynamically injects `service_tier: "priority"` for under-burned requests when cached or freshly warmed usage data shows capacity is ahead of time, with an end-of-window bias that helps spend otherwise stranded capacity before reset.
-- Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, compared account scores in `[plan] account: score` form with numeric values right-aligned so decimal points line up, and the reason that account was chosen.
-- Shows a separate toast when fast-mode flips for the same sticky session without an account switch.
+- Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, compared account scores in `[plan] account: score` form with numeric values right-aligned so decimal points line up, the reason that account was chosen, and a compact fast-mode graph that shows the rule label plus `+ left`, `- time`, `+ bonus`, `- margin`, and `= score` for the deciding window when data is available.
+- Shows a separate toast when fast-mode flips for the same sticky session without an account switch, using the same compact fast-mode graph format.
 
 ## How it works
 
@@ -24,7 +24,7 @@
 
 - **Sticky affinity**: When a request body includes `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for five minutes. It only switches away when the best currently ranked alternative is materially better, blocked, or no longer available.
 
-- **Dynamic fast-mode**: After the account is chosen, the fetch layer may decorate that attempt with `service_tier: "priority"`. This is intentionally post-ranking: routing uses the shared SQLite quota cache, while fast-mode checks the selected account's separate in-memory usage cache. Fast-mode stays conservative, is span-aware across complete windows, adds an end-of-window burn bonus so near-reset capacity is less likely to be stranded, forces off below a `3%` remaining-capacity floor, turns off when a considered limit is blocked or incomplete, and never overrides a caller-provided `service_tier` or `serviceTier`.
+- **Dynamic fast-mode**: After the account is chosen, the fetch layer may decorate that attempt with `service_tier: "priority"`. This is intentionally post-ranking: routing uses the shared SQLite quota cache, while fast-mode checks the selected account's separate in-memory usage cache. Fast-mode stays conservative, is span-aware across complete windows, adds an end-of-window burn bonus so near-reset capacity is less likely to be stranded, forces off below a `3%` remaining-capacity floor, turns off when a considered limit is blocked or incomplete, never overrides a caller-provided `service_tier` or `serviceTier`, and now reports the result in the toast as a compact rule label with an ASCII-style `+ / - / =` breakdown for the deciding window when that data exists.
 
 - **Retries and replay safety**: If a request gets a `429`, that account is placed on cooldown and the next ranked account is tried. If a request gets a `401`, the plugin refreshes the token and retries once. Accounts are only disabled after a request still returns `401` after that refresh retry; transient request, refresh, or usage-fetch errors do not disable the account. Request bodies are snapshotted before retries so failover and token refresh can safely replay the same payload without leaking one attempt's `service_tier` decision into another. Selection toasts are emitted immediately before the outbound prompt attempt for the chosen account.
 

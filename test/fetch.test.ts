@@ -25,6 +25,30 @@ interface Toast {
   duration: number;
 }
 
+function fastToast(
+  fast: boolean,
+  detail: string,
+  because: string,
+  rule: string,
+  rows: string[] = [],
+  target?: string,
+) {
+  const lines = [
+    `Fast-mode ${fast ? "enabled" : "disabled"}`,
+    "",
+    detail,
+    `Because: ${because}`,
+    "",
+    "Fast:",
+    `rule    [${rule}]`,
+  ];
+
+  if (target) lines.push(`target  ${target}`);
+  lines.push(...rows);
+
+  return lines.join("\n");
+}
+
 function row(
   id: string,
   priority: number,
@@ -193,8 +217,14 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-toast: 0.500\n> [unknown] pool-toast: 0.800\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-toast: 0.500\n> [unknown] pool-toast: 0.800",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -222,8 +252,14 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n> [unknown] core-warm: n/a\n  [unknown] pool-warm: n/a\nBecause: quota cache warming",
+        message: fastToast(
+          false,
+          "Accounts:\n> [unknown] core-warm: n/a\n  [unknown] pool-warm: n/a",
+          "quota cache warming",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -243,7 +279,14 @@ describe("createFetch", () => {
       if (url(input) === CODEX_API_ENDPOINT) {
         expect(toasts).toHaveLength(1);
         expect(toasts[0]?.message).toBe(
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-before: 0.500\n> [unknown] pool-before: 0.800\nBecause: higher score",
+          fastToast(
+            false,
+            "Accounts:\n  [unknown] core-before: 0.500\n> [unknown] pool-before: 0.800",
+            "higher score",
+            "no data",
+            [],
+            "request body",
+          ),
         );
         prompt = true;
       }
@@ -283,9 +326,22 @@ describe("createFetch", () => {
 
       expect(url(input)).toBe(CODEX_API_ENDPOINT);
       expect(toasts).toHaveLength(1);
-      expect(toasts[0]?.message).toBe(
-          "Fast-mode enabled\n\nAccount:\n> [unknown] fast-before: n/a\nBecause: only available account",
-      );
+        expect(toasts[0]?.message).toBe(
+          fastToast(
+            true,
+            "Account:\n> [unknown] fast-before: n/a",
+            "only available account",
+            "ok",
+            [
+              "+ left   [**      ]  21.0%",
+              "- time   [*       ]  10.0%",
+              "+ bonus  [*       ]   6.6%",
+              "- margin [        ]   0.3%",
+              "= score  [******  ] +0.173",
+            ],
+            "rate.primary",
+          ),
+        );
       expect(body(await snap(input, init)).service_tier).toBe("priority");
       prompt = true;
       return new Response(await new Response(init?.body).text(), { status: 200 });
@@ -369,15 +425,27 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n> [unknown] core-429: 0.900\n  [unknown] pool-429: 0.400\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n> [unknown] core-429: 0.900\n  [unknown] pool-429: 0.400",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-429: 0.900\n> [unknown] pool-429: 0.400\nBecause: core-429 hit 429 cooldown",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-429: 0.900\n> [unknown] pool-429: 0.400",
+          "core-429 hit 429 cooldown",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -417,8 +485,14 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n> [plus] account1@foobar.com: 123.456\n  [pro]  account2@a.com     :   4.567\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n> [plus] account1@foobar.com: 123.456\n  [pro]  account2@a.com     :   4.567",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -483,8 +557,14 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-compare: 0.500\n  [unknown] pool-first  : 0.800\n> [unknown] pool-second : 1.200\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-compare: 0.500\n  [unknown] pool-first  : 0.800\n> [unknown] pool-second : 1.200",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -525,22 +605,40 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n> [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n> [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-fallback       : 0.900\n> [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700\nBecause: core-fallback hit 429 cooldown",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-fallback       : 0.900\n> [unknown] pool-first-fallback : 0.800\n  [unknown] pool-second-fallback: 0.700",
+          "core-fallback hit 429 cooldown",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n> [unknown] pool-second-fallback: 0.700\nBecause: pool-first-fallback hit 429 cooldown",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-fallback       : 0.900\n  [unknown] pool-first-fallback : 0.800\n> [unknown] pool-second-fallback: 0.700",
+          "pool-first-fallback hit 429 cooldown",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -889,8 +987,20 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode enabled\n\nAccount:\n> [unknown] fast-toast: n/a\nBecause: only available account",
+        message: fastToast(
+          true,
+          "Account:\n> [unknown] fast-toast: n/a",
+          "only available account",
+          "ok",
+          [
+            "+ left   [**      ]  21.0%",
+            "- time   [*       ]  10.0%",
+            "+ bonus  [*       ]   6.6%",
+            "- margin [        ]   0.3%",
+            "= score  [******  ] +0.173",
+          ],
+          "rate.primary",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -947,8 +1057,20 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode enabled\n\nAccount:\n> [unknown] fast-flip: n/a\nBecause: only available account",
+        message: fastToast(
+          true,
+          "Account:\n> [unknown] fast-flip: n/a",
+          "only available account",
+          "ok",
+          [
+            "+ left   [**      ]  21.0%",
+            "- time   [        ]   5.0%",
+            "+ bonus  [*       ]   7.0%",
+            "- margin [        ]   0.1%",
+            "= score  [******* ] +0.229",
+          ],
+          "rate.primary",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -1005,8 +1127,21 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccount:\n> [unknown] fast-flip-up: n/a\nBecause: only available account",
+        message: fastToast(
+          false,
+          "Account:\n> [unknown] fast-flip-up: n/a",
+          "only available account",
+          "low cap",
+          [
+            "+ left   [        ]   2.0%",
+            "- time   [        ]   5.0%",
+            "+ bonus  [        ]   0.7%",
+            "- margin [        ]   0.1%",
+            "= score  [-       ] -0.024",
+            "need cap [        ]   3.0%",
+          ],
+          "rate.primary",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -1063,15 +1198,39 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode enabled\n\nAccount:\n> [unknown] fast-expire: n/a\nBecause: only available account",
+        message: fastToast(
+          true,
+          "Account:\n> [unknown] fast-expire: n/a",
+          "only available account",
+          "ok",
+          [
+            "+ left   [**      ]  21.0%",
+            "- time   [        ]   5.0%",
+            "+ bonus  [*       ]   7.0%",
+            "- margin [        ]   0.1%",
+            "= score  [******* ] +0.229",
+          ],
+          "rate.primary",
+        ),
         variant: "info",
         duration: 10_000,
       },
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode enabled\n\nAccount:\n> [plus] fast-expire: 14.557 cached\nBecause: only available account",
+        message: fastToast(
+          true,
+          "Account:\n> [plus] fast-expire: 14.557 cached",
+          "only available account",
+          "ok",
+          [
+            "+ left   [**      ]  21.0%",
+            "- time   [        ]   5.0%",
+            "+ bonus  [*       ]   7.0%",
+            "- margin [        ]   0.1%",
+            "= score  [******* ] +0.229",
+          ],
+          "rate.primary",
+        ),
         variant: "info",
         duration: 10_000,
       },
@@ -2662,8 +2821,14 @@ describe("createFetch", () => {
     expect(toasts).toEqual([
       {
         title: "Codex Pool",
-        message:
-          "Fast-mode disabled\n\nAccounts:\n  [unknown] pool-first-only : 0.400\n> [unknown] pool-second-only: 0.800\nBecause: higher score",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] pool-first-only : 0.400\n> [unknown] pool-second-only: 0.800",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+        ),
         variant: "info",
         duration: 10_000,
       },
