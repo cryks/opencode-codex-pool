@@ -634,6 +634,55 @@ describe("createFetch", () => {
     });
   });
 
+  test("allows near-reset windows to enable fast-mode before capacity is stranded", async () => {
+    store.upsert(row("fast-late", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 90,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+  });
+
   test("keeps 5h windows more conservative than 7d windows at the same progress", async () => {
     store.upsert(row("fast-window-5h", 0));
 
@@ -647,8 +696,8 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 43,
-              reset_after_seconds: 9_000,
+              used_percent: 19,
+              reset_after_seconds: 14_400,
               limit_window_seconds: 18_000,
             },
           },
@@ -692,8 +741,8 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 43,
-              reset_after_seconds: 302_400,
+              used_percent: 19,
+              reset_after_seconds: 483_840,
               limit_window_seconds: 604_800,
             },
           },
@@ -728,7 +777,7 @@ describe("createFetch", () => {
     });
   });
 
-  test("stale usage keeps the current 5h request on cached fast-mode state while rewarming", async () => {
+  test("stale usage keeps the current request on cached fast-mode state while rewarming", async () => {
     store.upsert(row("fast-window-late", 0));
 
     const hits: Hit[] = [];
@@ -743,8 +792,8 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 42 : 82,
-              reset_after_seconds: usageHits === 1 ? 9_000 : 1_800,
+              used_percent: usageHits === 1 ? 19 : 79,
+              reset_after_seconds: usageHits === 1 ? 14_400 : 900,
               limit_window_seconds: 18_000,
             },
           },
@@ -862,9 +911,9 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 79 : 82,
-              reset_after_seconds: usageHits === 1 ? 900 : 1_000,
-              limit_window_seconds: 9_000,
+              used_percent: usageHits === 1 ? 79 : 98,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
             },
           },
         });
@@ -920,9 +969,9 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 82 : 79,
-              reset_after_seconds: usageHits === 1 ? 1_000 : 900,
-              limit_window_seconds: 9_000,
+              used_percent: usageHits === 1 ? 98 : 90,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
             },
           },
         });
@@ -978,9 +1027,9 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: usageHits === 1 ? 79 : 82,
-              reset_after_seconds: usageHits === 1 ? 900 : 1_000,
-              limit_window_seconds: 9_000,
+              used_percent: usageHits === 1 ? 79 : 98,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
             },
           },
         });
@@ -1022,14 +1071,14 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode enabled\nReason: only available account\nAccount:\n> [plus] fast-expire: 5.006 cached",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> [plus] fast-expire: 14.557 cached",
         variant: "info",
         duration: 10_000,
       },
     ]);
   });
 
-  test("skips priority injection when fresh quota falls below the weighted threshold", async () => {
+  test("skips priority injection when remaining capacity falls below the floor", async () => {
     store.upsert(row("fast-off", 0));
 
     const hits: Hit[] = [];
@@ -1042,9 +1091,9 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 84,
-              reset_after_seconds: 1_000,
-              limit_window_seconds: 9_000,
+              used_percent: 98,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
             },
           },
         });
@@ -1199,9 +1248,9 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 84,
-              reset_after_seconds: 1_100,
-              limit_window_seconds: 9_000,
+              used_percent: 98,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
             },
           },
         });
@@ -1281,7 +1330,7 @@ describe("createFetch", () => {
     expect(hits.map((item) => item.body)).toEqual(["native-body", "native-body"]);
   });
 
-  test("uses the most conservative delta across additional rate limits", async () => {
+  test("uses the most conservative fast-mode score across additional rate limits", async () => {
     store.upsert(row("fast-conservative", 0));
 
     const hits: Hit[] = [];
@@ -1293,19 +1342,74 @@ describe("createFetch", () => {
         return usage({
           plan_type: "plus",
           rate_limit: {
-            primary_window: {
-              used_percent: 79,
-              reset_after_seconds: 900,
-              limit_window_seconds: 9_000,
+                primary_window: {
+                  used_percent: 79,
+                  reset_after_seconds: 900,
+                  limit_window_seconds: 9_000,
             },
           },
           additional_rate_limits: [
             {
               rate_limit: {
                 primary_window: {
-                  used_percent: 84,
-                  reset_after_seconds: 1_000,
-                  limit_window_seconds: 9_000,
+                  used_percent: 98,
+                  reset_after_seconds: 900,
+                  limit_window_seconds: 18_000,
+                },
+              },
+            },
+          ],
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    await Bun.sleep(0);
+    hits.length = 0;
+
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+  });
+
+  test("skips priority injection when a considered window is incomplete", async () => {
+    store.upsert(row("fast-incomplete", 0));
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 90,
+              reset_after_seconds: 900,
+              limit_window_seconds: 18_000,
+            },
+          },
+          additional_rate_limits: [
+            {
+              rate_limit: {
+                primary_window: {
+                  used_percent: 10,
+                  limit_window_seconds: 18_000,
                 },
               },
             },

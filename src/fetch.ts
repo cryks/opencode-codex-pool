@@ -72,9 +72,11 @@ function place(rows: Row[], id: string) {
 const decoder = new TextDecoder();
 const FAST_WINDOW_BASE = 18_000;
 const FAST_WINDOW_CEIL = 604_800;
-const FAST_START_DROP = 0.2;
-const FAST_END_SHORT = 0.7;
-const FAST_END_LONG = 0.2;
+const FAST_SLACK_SHORT = 0.1;
+const FAST_SLACK_LONG = 0.08;
+const FAST_SLACK_GAMMA = 1.5;
+const FAST_BONUS = 0.35;
+const FAST_MIN_LEFT = 0.03;
 const HEALTH_RANGE = 0.2;
 const HEALTH_BONUS = 0.12;
 const HEALTH_PENALTY = 0.18;
@@ -127,7 +129,6 @@ interface JsonBody {
   tier: boolean;
 }
 
-const FAST_DELTA = 0.1;
 const usageCache = new Map<string, UsageHit>();
 const loadingUsage = new Map<string, Promise<Usage | null>>();
 
@@ -439,24 +440,23 @@ function fastSpan(win: ReadyWindow) {
   return ceil > 0 ? clamp(base / ceil, 0, 1) : 0;
 }
 
-function fastNeed(win?: Window) {
+function fastSlack(win?: Window) {
   const item = readyWindow(win);
   if (item === undefined) return undefined;
   if (item === null) return null;
 
   const span = fastSpan(item);
+  const base =
+    FAST_SLACK_SHORT - (FAST_SLACK_SHORT - FAST_SLACK_LONG) * span;
   const time = clamp(
     item.reset_after_seconds / item.limit_window_seconds,
     0,
     1,
   );
-  const start = FAST_DELTA * (1 - FAST_START_DROP * span);
-  const end =
-    FAST_DELTA * (FAST_END_SHORT - (FAST_END_SHORT - FAST_END_LONG) * span);
-  return end + (start - end) * time;
+  return base * time ** FAST_SLACK_GAMMA;
 }
 
-function delta(win?: Window) {
+function fastScore(win?: Window) {
   const item = readyWindow(win);
   if (item === undefined) return undefined;
   if (item === null) return null;
@@ -466,16 +466,20 @@ function delta(win?: Window) {
     0,
     1,
   );
-  const need = fastNeed(item);
-  if (typeof need !== "number") return null;
-  return left - time - need;
+  if (left < FAST_MIN_LEFT) return -1;
+  const slack = fastSlack(item);
+  if (typeof slack !== "number") return null;
+  return left - time + FAST_BONUS * (1 - time) * left - slack;
 }
 
-function limitDelta(limit?: Limit) {
+function limitFastScore(limit?: Limit) {
   if (!limit) return undefined;
   if (blocked(limit)) return null;
 
-  const list = [delta(limit.primary_window), delta(limit.secondary_window)];
+  const list = [
+    fastScore(limit.primary_window),
+    fastScore(limit.secondary_window),
+  ];
   if (list.includes(null)) return null;
   const values = list.filter((item): item is number => item !== undefined);
   if (values.length === 0) return null;
@@ -483,9 +487,9 @@ function limitDelta(limit?: Limit) {
 }
 
 function fast(usage: Usage) {
-  const list = [limitDelta(usage.rate_limit)];
+  const list = [limitFastScore(usage.rate_limit)];
   for (const item of usage.additional_rate_limits ?? []) {
-    list.push(limitDelta(item.rate_limit));
+    list.push(limitFastScore(item.rate_limit));
   }
   if (list.includes(null)) return false;
   const values = list.filter((item): item is number => item !== undefined);
