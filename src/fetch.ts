@@ -24,6 +24,7 @@ const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
 const DORMANT_SLACK = 60;
+const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
 
 interface Affinity {
   id?: string;
@@ -179,7 +180,7 @@ function boost(left: number, time: number) {
 
 function weight(plan?: string) {
   const key = plan?.toLowerCase();
-  if (key === "pro") return 6.7;
+  if (key === "pro") return PRO_PLAN_WEIGHT;
   if (key === "plus") return 1;
   if (key === "team") return 1;
   return 1;
