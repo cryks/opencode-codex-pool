@@ -958,7 +958,6 @@ export function createFetch(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         note = `${name(row)} errored`;
-        store.disable(row.id, msg);
         last = err instanceof Error ? err : new Error(msg);
       }
     }
