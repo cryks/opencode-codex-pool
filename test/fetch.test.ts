@@ -1022,7 +1022,7 @@ describe("createFetch", () => {
       {
         title: "Codex Pool",
         message:
-          "Fast-mode enabled\nReason: only available account\nAccount:\n> [plus] fast-expire: 4.696 cached",
+          "Fast-mode enabled\nReason: only available account\nAccount:\n> [plus] fast-expire: 5.006 cached",
         variant: "info",
         duration: 10_000,
       },
@@ -1598,6 +1598,66 @@ describe("createFetch", () => {
     expect(hits).toEqual([
       "Bearer core-plus-access",
       "Bearer pool-pro-access",
+    ]);
+  });
+
+  test("prefers a healthy plus pool over a slightly ahead pro core when the base scores are tied", async () => {
+    store.upsert(row("core-pro-ahead", 0, { primary: 1 }));
+    store.setPrimary("core-pro-ahead");
+    store.upsert(row("pool-plus-healthy", 1));
+
+    let scans = 0;
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        if (auth === "Bearer core-pro-ahead-access") {
+          return usage({
+            plan_type: "pro",
+            rate_limit: {
+              primary_window: {
+                used_percent: 49,
+                reset_after_seconds: 12_000,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 33,
+              reset_after_seconds: 2_400,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(scans).toBe(2);
+    expect(hits).toEqual([
+      "Bearer core-pro-ahead-access",
+      "Bearer pool-plus-healthy-access",
     ]);
   });
 

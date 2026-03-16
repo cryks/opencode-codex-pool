@@ -75,6 +75,9 @@ const FAST_WINDOW_CEIL = 604_800;
 const FAST_START_DROP = 0.2;
 const FAST_END_SHORT = 0.7;
 const FAST_END_LONG = 0.2;
+const HEALTH_RANGE = 0.2;
+const HEALTH_BONUS = 0.12;
+const HEALTH_PENALTY = 0.18;
 
 function cacheKey(body: ArrayBuffer | null): string | undefined {
   if (!body) return undefined;
@@ -130,6 +133,16 @@ const loadingUsage = new Map<string, Promise<Usage | null>>();
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function health(left: number, time: number) {
+  return left - time;
+}
+
+function boost(left: number, time: number) {
+  const scaled = clamp(health(left, time) / HEALTH_RANGE, -1, 1);
+  if (scaled >= 0) return 1 + HEALTH_BONUS * scaled;
+  return 1 + HEALTH_PENALTY * scaled;
 }
 
 function weight(plan?: string) {
@@ -381,11 +394,13 @@ function windowScore(win: Window | undefined, plan: number) {
   const span = win.limit_window_seconds;
   if (typeof span === "number" && Number.isFinite(span) && span > 0) {
     const cap = Math.sqrt(span / CAPACITY_REF);
-    if (dormant(win, used)) return plan * left * cap;
+    const time = clamp(secs / span, 0, 1);
+    const factor = boost(left, time);
+    if (dormant(win, used)) return plan * left * cap * factor;
 
-    const pace = Math.max(secs / span, 0.000001);
+    const pace = Math.max(time, 0.000001);
     const cons = conservation(secs);
-    return (plan * left * cap) / (pace * cons);
+    return ((plan * left * cap) / (pace * cons)) * factor;
   }
 
   return (plan * left) / secs;
