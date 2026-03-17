@@ -9,6 +9,7 @@
 - Reorders all currently available accounts by remaining quota score, across both the primary account (`core`) and secondary accounts (`pool`).
 - Retries on rate limits by cooling down the current account and moving to the next available one.
 - Refreshes expired tokens automatically and coordinates refreshes across processes with SQLite locks.
+- Polls recently active accounts every 30 seconds, revalidates shared usage data in the background once it is older than 3 minutes, and deduplicates those usage fetches across processes with SQLite locks.
 - Keeps per-session affinity for a short window so prompt-cache warmth is not lost unnecessarily.
 - Dynamically injects `service_tier: "priority"` for requests whose selected account still looks healthy under a longest-window-main, shorter-window-guard fast-mode profile.
 - Shows a compact selection toast immediately before each outbound prompt attempt, with a `>` marker on the chosen account, whether fast-mode is enabled for that attempt, per-account routing summaries that show the final score plus `[main window]` and `[guard window]` details when a multi-window `rate_limit` is reduced, the reason that account was chosen, and a compact fast-mode section that shows `status  enabled` or `status  disabled (<reason>)` plus a `main` line and `= base`, optional `- guard`, and `= final` breakdown.
@@ -20,7 +21,7 @@
 
 - **Account model and state**: `core` is the primary mirrored OAuth account that keeps opencode in Codex mode. `pool` is every non-primary account stored in SQLite. SQLite is the runtime source of truth for account tokens, cooldown state, refresh locks, and shared usage cache, while pool auth state is represented with an inert shadow provider marker.
 
-- **Quota-aware routing**: For each request, the router reads cached raw usage payloads from the ChatGPT usage endpoint, derives a quota score for every currently available account, then reorders the full candidate list by score. Higher score means more weighted capacity is worth spending now, and ties fall back to stored priority. The per-window score still combines plan weight, remaining capacity, window size, recovery cost, and a bounded health adjustment. Plan weighting intentionally compresses Pro's published ~6.7x capacity advantage to `sqrt(6.7)` (~2.59). When `rate_limit` exposes multiple complete windows with a clear longest span, the router uses the longest window as the main ranking score and applies shorter windows only as guardrails, multiplying the main score by the worst guard factor derived from ahead-of-time debt and the same `3%` low-cap floor. This keeps 5h windows from owning the rank by default while still letting short-window pressure suppress an account. If the windows cannot be reduced cleanly, ranking falls back to the previous conservative raw-window comparison. `additional_rate_limits` and `code_review_rate_limit` are ignored for ranking.
+- **Quota-aware routing**: For each request, the router reads cached raw usage payloads from the ChatGPT usage endpoint, derives a quota score for every currently available account, then reorders the full candidate list by score. Higher score means more weighted capacity is worth spending now, and ties fall back to stored priority. The per-window score still combines plan weight, remaining capacity, window size, recovery cost, and a bounded health adjustment. Plan weighting intentionally compresses Pro's published ~6.7x capacity advantage to `sqrt(6.7)` (~2.59). When `rate_limit` exposes multiple complete windows with a clear longest span, the router uses the longest window as the main ranking score and applies shorter windows only as guardrails, multiplying the main score by the worst guard factor derived from ahead-of-time debt and the same `3%` low-cap floor. This keeps 5h windows from owning the rank by default while still letting short-window pressure suppress an account. If the windows cannot be reduced cleanly, ranking falls back to the previous conservative raw-window comparison. `additional_rate_limits` and `code_review_rate_limit` are ignored for ranking. Request-driven warming still applies, and a background poller keeps recently active accounts revalidated between requests.
 
 - **Sticky affinity**: When a request body includes `prompt_cache_key`, the router remembers which account last succeeded for that session and prefers to stay on it for five minutes. It only switches away when the best currently ranked alternative is materially better, blocked, or no longer available.
 
@@ -78,6 +79,7 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - SQLite is the runtime source of truth for accounts, cooldowns, refresh locks, and shared usage cache.
 - The database runs in WAL mode so multiple opencode instances can share the same state.
 - Raw usage payloads are cached in SQLite for 60 seconds and reused across instances for both ranking and fast-mode.
+- Recently active accounts are polled every 30 seconds. The poller only revalidates an account when its shared usage cache is older than 3 minutes, and per-account usage refreshes are deduplicated across opencode processes with a shared SQLite lock.
 - When shared usage cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When shared usage cache data is stale but still within the 1-hour fallback window, requests reuse the stale payloads for the current foreground decision while warming fresh data in the background. When a cached usage entry exists but is older than that 1-hour fallback window, the foreground request first shows a `Quota cache expired, fetching usage before selection` toast, waits for the available accounts' usage fetches to finish, and only then runs account selection and shows the normal selection toast.
 - Only missing usage forces a synchronous warm-up before a single-account prompt attempt that could use fast-mode.
 - Successful token refresh clears the account's cached usage payload so future ranking and fast-mode decisions use fresh credentials.
@@ -97,7 +99,7 @@ Tests use real SQLite databases (`:memory:` or temporary files), including multi
 ```text
 src/
   index.ts   - plugin entry, auth hook, auth methods, loader
-  fetch.ts   - quota-aware routing, shared usage-cache reads, request URL rewrite, 429 failover, sticky affinity, token refresh, refresh locking
+  fetch.ts   - quota-aware routing, shared usage-cache reads and polling, request URL rewrite, 429 failover, sticky affinity, token refresh, refresh locking
   store.ts   - SQLite CRUD for accounts, cooldowns, locks, and shared usage cache
   oauth.ts   - browser OAuth flow, device flow, token refresh
   sync.ts    - bootstrap existing primary auth into SQLite
@@ -114,7 +116,7 @@ test/
 - The primary account is special: it is mirrored back into opencode's `openai` auth so Codex-specific behavior remains enabled.
 - Different ChatGPT accounts do not share the same server-side prompt cache, so switching accounts mid-session can increase latency.
 - Quota ordering still balances absolute window capacity against recovery cost at the per-window level, but multi-window `rate_limit` values are no longer reduced with a hard minimum by default. The longest complete window now supplies the main ranking score, while shorter complete windows act as guardrails that can only shrink that score. This keeps long-horizon capacity in charge of normal ordering while still respecting short-horizon pressure.
-- Failed usage fetches do not write a negative cache entry; routing and fast-mode keep using existing cache state and retry warming later.
+- Failed usage fetches do not write a negative cache entry; routing, fast-mode, and background polling keep using existing cache state and retry warming later.
 - Request bodies are snapshotted before retries so failover and token refresh can replay the same payload safely.
 - Dynamic `service_tier` injection only applies to JSON request bodies headed to the rewritten Codex endpoint, and only when the caller did not already set a tier explicitly.
 - If every available account is rate limited, the last `429` response is returned.

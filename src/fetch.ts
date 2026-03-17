@@ -20,6 +20,11 @@ type Client = PluginInput["client"];
 type Row = NonNullable<ReturnType<Store["primary"]>>;
 const QUOTA_CACHE_MS = 1 * 60 * 1000;
 const STALE_QUOTA_MS = 60 * 60 * 1000;
+const USAGE_POLL_MS = 30 * 1000;
+const USAGE_REVALIDATE_MS = 3 * 60 * 1000;
+const USAGE_FETCH_LEASE_MS = 25 * 1000;
+const USAGE_FETCH_WAIT_MS = 5 * 1000;
+const USAGE_ACTIVE_MS = 5 * 60 * 1000;
 const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
@@ -174,7 +179,27 @@ interface JsonBody {
   tier: boolean;
 }
 
+interface UsagePoller {
+  touch(rows: Row[]): void;
+  flush(): Promise<void>;
+  stop(): void;
+}
+
+const scheduleTimeout = globalThis.setTimeout.bind(globalThis);
+const cancelTimeout = globalThis.clearTimeout.bind(globalThis);
 const loadingUsage = new Map<string, Promise<Usage | null>>();
+const usagePollers = new Map<Store, UsagePoller>();
+const usageClose = new WeakSet<Store>();
+
+export async function flushUsagePollers() {
+  await Promise.all([...usagePollers.values()].map((item) => item.flush()));
+}
+
+export function resetUsagePollers() {
+  for (const item of [...usagePollers.values()]) item.stop();
+  usagePollers.clear();
+  loadingUsage.clear();
+}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -1039,18 +1064,47 @@ async function fetchExpiredUsage(store: Store, rows: Row[], client: Client) {
   return true;
 }
 
-async function loadUsage(store: Store, row: Row) {
+async function waitUsage(store: Store, row: Row, maxAgeMs: number) {
+  const tries = Math.max(1, Math.ceil(USAGE_FETCH_WAIT_MS / 250));
+
+  for (let i = 0; i < tries; i += 1) {
+    await new Promise((r) => setTimeout(r, 250));
+    const cached = store.usage(row.id, maxAgeMs);
+    if (cached !== undefined) return cached;
+  }
+
+  return undefined;
+}
+
+async function loadUsage(store: Store, row: Row, maxAgeMs = QUOTA_CACHE_MS) {
   const account = row.chatgpt_account_id;
   if (!account) return null;
 
-  const cached = store.usage(row.id, QUOTA_CACHE_MS);
+  const cached = store.usage(row.id, maxAgeMs);
   if (cached !== undefined) return cached;
 
   const held = loadingUsage.get(row.id);
   if (held) return held;
 
   const load = (async () => {
+    const key = `usage:${row.id}`;
+    const owner = crypto.randomUUID();
+    let locked = store.acquireLock(key, owner, USAGE_FETCH_LEASE_MS);
+
+    if (!locked) {
+      const shared = await waitUsage(store, row, maxAgeMs);
+      if (shared !== undefined) return shared;
+
+      locked = store.acquireLock(key, owner, USAGE_FETCH_LEASE_MS);
+      if (!locked) {
+        return store.usage(row.id, STALE_QUOTA_MS) ?? null;
+      }
+    }
+
     try {
+      const shared = store.usage(row.id, maxAgeMs);
+      if (shared !== undefined) return shared;
+
       const headers = new Headers();
       headers.set("authorization", `Bearer ${row.access_token}`);
       headers.set("accept", "application/json");
@@ -1065,6 +1119,7 @@ async function loadUsage(store: Store, row: Row) {
     } catch {
       return null;
     } finally {
+      if (locked) store.releaseLock(key, owner);
       loadingUsage.delete(row.id);
     }
   })();
@@ -1114,6 +1169,130 @@ async function ready(store: Store, row: Row, client: Client) {
   } catch {
     return row;
   }
+}
+
+function createUsagePoller(
+  store: Store,
+  client: Client,
+  release: () => void,
+): UsagePoller {
+  const seen = new Map<string, number>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let run: Promise<void> | undefined;
+  let stopped = false;
+  let poller: UsagePoller;
+
+  function prune() {
+    const min = Date.now() - USAGE_ACTIVE_MS;
+
+    for (const [id, at] of seen) {
+      if (at < min) seen.delete(id);
+    }
+  }
+
+  function schedule() {
+    if (stopped || timer || run || seen.size === 0) return;
+
+    timer = scheduleTimeout(() => {
+      timer = undefined;
+      void sweep();
+    }, USAGE_POLL_MS);
+    timer.unref?.();
+  }
+
+  async function sweep() {
+    if (run) return run;
+
+    run = (async () => {
+      try {
+        if (stopped) return;
+
+        prune();
+        if (seen.size === 0) return;
+
+        const rows = await Promise.all(
+          store
+            .available()
+            .filter((row) => seen.has(row.id) && row.chatgpt_account_id)
+            .map((row) => ready(store, row, client)),
+        );
+
+        await Promise.all(
+          rows.map((row) => {
+            if (store.usage(row.id, USAGE_REVALIDATE_MS) !== undefined) {
+              return Promise.resolve(null);
+            }
+
+            return loadUsage(store, row, USAGE_REVALIDATE_MS);
+          }),
+        );
+      } finally {
+        run = undefined;
+        if (!stopped) {
+          prune();
+          schedule();
+        }
+      }
+    })();
+
+    return run;
+  }
+
+  poller = {
+    touch(rows) {
+      if (stopped) return;
+
+      const now = Date.now();
+      for (const row of rows) {
+        if (!row.chatgpt_account_id) continue;
+        seen.set(row.id, now);
+      }
+
+      prune();
+      schedule();
+    },
+
+    async flush() {
+      if (timer) {
+        cancelTimeout(timer);
+        timer = undefined;
+      }
+
+      await sweep();
+    },
+
+    stop() {
+      stopped = true;
+      seen.clear();
+      if (timer) cancelTimeout(timer);
+      timer = undefined;
+      release();
+    },
+  };
+
+  return poller;
+}
+
+function useUsagePoller(store: Store, client: Client) {
+  const held = usagePollers.get(store);
+  if (held) return held;
+
+  const poller = createUsagePoller(store, client, () => {
+    if (usagePollers.get(store) === poller) usagePollers.delete(store);
+  });
+
+  usagePollers.set(store, poller);
+
+  if (!usageClose.has(store)) {
+    const close = store.close.bind(store);
+    store.close = () => {
+      usagePollers.get(store)?.stop();
+      close();
+    };
+    usageClose.add(store);
+  }
+
+  return poller;
 }
 
 function rank(
@@ -1279,6 +1458,7 @@ export function createFetch(
   client: Client,
 ) {
   const sessions = new Map<string, Affinity>();
+  const poller = useUsagePoller(store, client);
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const auth = await getAuth();
@@ -1311,6 +1491,7 @@ export function createFetch(
     const rows = await Promise.all(
       store.available().map((item) => ready(store, item, client)),
     );
+    poller.touch(rows);
     const prefetched = await fetchExpiredUsage(store, rows, client);
     const ranked = rank(store, rows, affinity, !prefetched);
     const ordered = ranked.rows;

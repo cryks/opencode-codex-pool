@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Auth } from "@opencode-ai/sdk";
 
-import { createFetch } from "../src/fetch";
+import {
+  createFetch,
+  flushUsagePollers,
+  resetUsagePollers,
+} from "../src/fetch";
 import { open } from "../src/store";
 import type { Store } from "../src/store";
 import {
@@ -193,6 +200,7 @@ describe("createFetch", () => {
   });
 
   afterEach(() => {
+    resetUsagePollers();
     globalThis.fetch = old;
     globalThis.setTimeout = wait;
     Date.now = now;
@@ -3233,6 +3241,131 @@ describe("createFetch", () => {
       "Bearer pool-stale-access",
       "Bearer pool-stale-access",
     ]);
+  });
+
+  test("revalidates active accounts in the background after the polling window", async () => {
+    store.upsert(row("poll-active", 0));
+
+    const base = Date.now();
+    store.cacheUsage("poll-active", scored(0.5), base);
+
+    let scans = 0;
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        scans += 1;
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer poll-active-access",
+        );
+        return usage(20, 600);
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    Date.now = () => base;
+    const first = await run("https://api.openai.com/v1/responses");
+    expect(first.status).toBe(200);
+    expect(scans).toBe(0);
+
+    Date.now = () => base + 120_000;
+    await flushUsagePollers();
+    expect(scans).toBe(0);
+
+    Date.now = () => base + 180_001;
+    await flushUsagePollers();
+    expect(scans).toBe(1);
+  });
+
+  test("deduplicates background usage polling across fetch instances", async () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.sqlite`);
+    const left = open(path);
+    const right = open(path);
+    const base = Date.now();
+
+    try {
+      left.upsert(row("shared-poll", 0));
+      left.cacheUsage("shared-poll", scored(0.5), base);
+
+      let active = 0;
+      let scans = 0;
+      let peak = 0;
+      globalThis.fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        if (url(input) === CODEX_USAGE_ENDPOINT) {
+          scans += 1;
+          active += 1;
+          peak = Math.max(peak, active);
+          expect(new Headers(init?.headers).get("authorization")).toBe(
+            "Bearer shared-poll-access",
+          );
+          await Bun.sleep(25);
+          active -= 1;
+          return usage(20, 600);
+        }
+
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+
+      const { client: leftClient } = stub();
+      const { client: rightClient } = stub();
+      const leftRun = createFetch(left, async () => auth(), leftClient);
+      const rightRun = createFetch(right, async () => auth(), rightClient);
+
+      Date.now = () => base;
+      const first = await leftRun("https://api.openai.com/v1/responses");
+      const second = await rightRun("https://api.openai.com/v1/responses");
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(scans).toBe(0);
+
+      Date.now = () => base + 180_001;
+      await flushUsagePollers();
+
+      expect(scans).toBe(1);
+      expect(peak).toBe(1);
+    } finally {
+      left.close();
+      right.close();
+      rmSync(path, { force: true });
+    }
+  });
+
+  test("store.close disposes the shared usage poller", async () => {
+    const local = open(":memory:");
+
+    try {
+      local.upsert(row("poll-close", 0));
+      local.cacheUsage("poll-close", scored(0.5), Date.now());
+
+      let scans = 0;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (url(input) === CODEX_USAGE_ENDPOINT) scans += 1;
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+
+      const { client } = stub();
+      const run = createFetch(local, async () => auth(), client);
+      const res = await run("https://api.openai.com/v1/responses");
+
+      expect(res.status).toBe(200);
+      local.close();
+      await flushUsagePollers();
+      expect(scans).toBe(0);
+    } finally {
+      resetUsagePollers();
+      try {
+        local.close();
+      } catch {}
+    }
   });
 
   test("refresh clears a stale quota cache and falls back to core until usage is rewarmed", async () => {

@@ -10,7 +10,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 ### Key design decisions
 
-- SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, and shared usage cache.
+- SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, shared usage cache, and the cross-process locks that coordinate refresh and usage revalidation.
 - Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and are represented in auth state through the inert shadow provider.
 - Auth methods expose primary login, pool-account addition, and a minimal `Edit pool accounts` manager that lists current non-primary rows and can delete a selected pool account after confirmation.
 - The built-in Codex `chat.headers` hook is not duplicated; it runs as-is.
@@ -29,6 +29,8 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
 - When `rate_limit` exposes multiple complete windows with a clear longest span, ranking treats the longest window as the main score and the shorter windows as guardrails instead of taking a hard minimum. The final routing score is `main_score * worst_guard_factor`, where each guard factor is `min(left_floor, 1 / (1 + debt))`, `debt = max(0, -normalized_guard_score)`, and `left_floor = remaining_capacity / 0.03` only when the guard window has less than `3%` remaining capacity. In that multi-window case, Pro plan weighting effectively lands on the longest window because the guard factor is derived from normalized guard health rather than plan-weighted raw score. If the windows cannot be reduced cleanly (for example, no clear longest complete window), ranking falls back to the previous conservative raw-window comparison. `additional_rate_limits` and `code_review_rate_limit` are ignored for account selection.
 - Raw usage payloads are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
+- Recently active accounts are polled every 30 seconds. The poller only revalidates an account when its shared usage cache is older than 3 minutes, so ranking freshness stays at 60 seconds while background revalidation stays less chatty than per-request stale warming.
+- Every usage refresh, including background polling, must acquire a per-account SQLite lock (`usage:<account-id>`) so simultaneous opencode processes collapse onto one actual `wham/usage` fetch per account.
 - If the shared usage cache is stale but not too old (currently up to 1 hour), keep using the expired cached payloads for the current foreground decision and warm them in the background. If a cached usage entry exists but is older than that 1-hour fallback window, emit a `Quota cache expired, fetching usage before selection` toast, wait for the available accounts' usage fetches to complete, then run account selection and emit the normal selection toast. If the shared usage cache is cold (`missing`) for either side, keep the current priority order and warm in the background. Only the older-than-1-hour expired-cache case should block the foreground request waiting on usage.
 - Once quota scores are available for the full candidate set, reorder requests by score across the entire fleet rather than only at the `core`/`pool` boundary.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
@@ -40,7 +42,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 - Fast-mode is implemented as post-ranking request decoration inside `src/fetch.ts`; it does **not** change account ordering or sticky affinity.
 - The final outbound field is OpenAI's `service_tier`, even though upstream config and provider options may use `serviceTier`.
-- Fast-mode uses the same shared SQLite raw usage cache that ranking uses for the current attempt. Fresh usage is authoritative for 60 seconds; stale cached usage may still drive the current foreground decision while a background refresh starts. Only `missing` usage should force a synchronous warm-up before a single-account prompt attempt.
+- Fast-mode uses the same shared SQLite raw usage cache that ranking uses for the current attempt. Fresh usage is authoritative for 60 seconds; a 30-second background poller revalidates recently active accounts once their cache age crosses 3 minutes; stale cached usage may still drive the current foreground decision while a background refresh starts. Only `missing` usage should force a synchronous warm-up before a single-account prompt attempt.
 - The trigger is score-based. For every complete considered window, compute the existing selection `windowScore`, then normalize it against a balanced same-window baseline where `remaining_capacity == remaining_time` (`left == time`). The normalized fast-mode window score is `ln(windowScore(actual) / windowScore(balanced))`, so `0` means on-pace, positive means healthier than pace, and negative means ahead of pace. Among the current scored `rate_limit` windows (`rate.primary` / `rate.secondary`), the window with the largest `span` becomes the fast-mode `main` value. If spans tie, the earlier window wins, which currently leaves `primary` as `main`. Every other scored window becomes a guardrail. `additional_rate_limits` are ignored for fast-mode. The final fast-mode score is `main_score - worst_guard_debt`, where `worst_guard_debt = max(0, -min(guard_scores))`. The current attempt enables fast-mode at `final_score >= 0.05`; a sticky session that was already fast-enabled keeps it until the score falls below `-0.02`.
 - Windows with less than `3%` remaining capacity force fast-mode off regardless of score. Missing main `rate_limit` data still yields `no data`. `code_review_rate_limit` remains ignored.
 - If any considered limit is blocked (`allowed = false` or `limit_reached = true`) or the main `rate_limit` window data is incomplete for fast-mode math, fast-mode stays off.
@@ -76,7 +78,7 @@ src/
   codex.ts   — Codex OAuth constants, PKCE, JWT parsing, token exchange
   oauth.ts   — Browser OAuth flow, headless device flow, token refresh
   sync.ts    — Bootstrap an existing primary OAuth auth record into SQLite
-  fetch.ts   — Multi-account fetch with quota-aware ordering, sticky affinity, 429 failover, refresh locking, and request URL rewrite
+  fetch.ts   — Multi-account fetch with quota-aware ordering, active-account usage polling, sticky affinity, 429 failover, refresh locking, and request URL rewrite
   types.ts   — Shared types and constants
 test/
   fetch.test.ts — Routing, failover, refresh, affinity, and quota-cache behavior
@@ -126,6 +128,9 @@ For source-based local development, pointing at `src/index.ts` still works becau
 - `SENTINEL_SHADOW_PROVIDER`: `openai-codex-pool-shadow` (inert auth.json record for additional accounts)
 - `OAUTH_DUMMY_KEY`: `OAUTH_DUMMY_KEY` (dummy key returned by the loader alongside the custom fetch)
 - `REFRESH_LEASE_MS`: `30_000` (SQLite refresh lock lease shared across processes)
+- Usage polling interval: `30_000` ms
+- Usage polling revalidation age: `180_000` ms (3 minutes)
+- Usage fetch lease: `25_000` ms (SQLite usage-refresh lock lease shared across processes)
 - `CONSERVATION_REF`: `14_400` (4 hours — tactical/strategic boundary)
 - `CONSERVATION_HORIZON`: `1_209_600` (2 weeks — conservation cap ceiling)
 - `CAPACITY_REF`: `1_800` (30 minutes — capacity normalization baseline)
