@@ -1658,9 +1658,9 @@ describe("createFetch", () => {
       },
       {
         title: "Codex Pool",
-        message: fastToast(
-          true,
-          "Account:\n> [plus] fast-expire:\n    [5h] 14.557 cached",
+          message: fastToast(
+            true,
+            "Account:\n> [plus] fast-expire (cached):\n    [5h] 14.557",
             "only available account",
             "ok",
             [
@@ -1675,6 +1675,30 @@ describe("createFetch", () => {
         duration: 10_000,
       },
     ]);
+  });
+
+  test("shows cached and blocked tags next to the account name in a fixed order", async () => {
+    store.upsert(row("stale-block", 0, { plan_type: "plus" }));
+
+    const staleAt = Date.now() - 120_000;
+    store.cacheUsage("stale-block", scored(0), staleAt);
+
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) return usage(90, 600);
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain(
+      "Account:\n> [plus] stale-block (cached, blocked): 0.000",
+    );
   });
 
   test("skips priority injection when remaining capacity falls below the floor", async () => {

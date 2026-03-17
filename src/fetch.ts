@@ -288,32 +288,34 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
 
 function text(item: ScoreView, scoreWidth: number) {
   if (item.main && item.guard && item.score !== undefined) {
-    const values = [
+    return [
       `final ${item.score.toFixed(3).padStart(scoreWidth)}`,
       `[main ${item.main.name}] ${item.main.score.toFixed(3).padStart(scoreWidth)}`,
       `[guard ${item.guard.name}] x${item.guard.factor.toFixed(3)}`,
-    ];
-    if (item.source === "stale") values.push("cached");
-    return values.join(" ");
+    ].join(" ");
   }
 
   if (item.windows.length > 0) {
-    const values = item.windows.map(
-      (win) => `[${win.name}] ${win.score.toFixed(3).padStart(scoreWidth)}`,
-    );
-    if (item.source === "stale") values.push("cached");
-    return values.join(" ");
+    return item.windows
+      .map((win) => `[${win.name}] ${win.score.toFixed(3).padStart(scoreWidth)}`)
+      .join(" ");
   }
 
   if (item.score === undefined) {
-    return item.source === "stale" ? "n/a cached" : "n/a";
+    return "n/a";
   }
 
-  const tags = [];
-  if (item.score === 0) tags.push("blocked");
-  if (item.source === "stale") tags.push("cached");
   const score = (item.score?.toFixed(3) ?? "n/a").padStart(scoreWidth);
-  return tags.length > 0 ? `${score} ${tags.join(" ")}` : score;
+  return score;
+}
+
+function title(item: ScoreView) {
+  const tags = [
+    item.source === "stale" ? "cached" : null,
+    item.score === 0 ? "blocked" : null,
+  ].filter((value): value is string => value !== null);
+  if (tags.length === 0) return item.name;
+  return `${item.name} (${tags.join(", ")})`;
 }
 
 function line(
@@ -324,7 +326,7 @@ function line(
 ) {
   const head = item.id === pick ? ">" : " ";
   const tier = `[${item.plan}]`.padEnd(planWidth + 2);
-  const prefix = `${head} ${tier} ${item.name}:`;
+  const prefix = `${head} ${tier} ${title(item)}:`;
   if (item.windows.length === 0) return `${prefix} ${text(item, scoreWidth)}`;
   return `${prefix}\n    ${text(item, scoreWidth)}`;
 }
