@@ -379,6 +379,89 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("fetches fresh usage for expired cache entries before ranking and showing the selection toast", async () => {
+    store.upsert(row("core-expired", 0, { primary: 1 }));
+    store.setPrimary("core-expired");
+    store.upsert(row("pool-expired", 1));
+
+    const expiredAt = Date.now() - 3_600_001;
+    store.cacheUsage("core-expired", scored(0.9), expiredAt);
+    store.cacheUsage("pool-expired", scored(0.1), expiredAt);
+
+    const hits: string[] = [];
+    const { client, toasts } = stub();
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        hits.push(`usage:${auth ?? ""}`);
+        if (auth === "Bearer core-expired-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 30,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      expect(toasts).toHaveLength(2);
+      hits.push(`prompt:${auth ?? ""}`);
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits).toEqual([
+      "usage:Bearer core-expired-access",
+      "usage:Bearer pool-expired-access",
+      "prompt:Bearer pool-expired-access",
+    ]);
+    expect(toasts).toEqual([
+      {
+        title: "Codex Pool",
+        message: "Quota cache expired, fetching usage before selection",
+        variant: "info",
+        duration: 10_000,
+      },
+      {
+        title: "Codex Pool",
+        message: fastToast(
+          false,
+          "Accounts:\n  [unknown] core-expired:\n    [5h] 53.126\n> [unknown] pool-expired:\n    [5h] 74.377",
+          "higher score",
+          "no data",
+          [],
+          "request body",
+          "pool-expired",
+        ),
+        variant: "info",
+        duration: 10_000,
+      },
+    ]);
+  });
+
   test("shows the selection toast before sending the prompt request", async () => {
     store.upsert(row("core-before", 0, { primary: 1 }));
     store.setPrimary("core-before");

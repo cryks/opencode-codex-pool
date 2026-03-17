@@ -343,6 +343,9 @@ export function open(path?: string) {
   >(
     "SELECT body FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
   );
+  const usageAny = db.prepare<Num, { account_id: string }>(
+    "SELECT COUNT(*) AS value FROM quota_cache WHERE account_id = $account_id",
+  );
   const cache = db.prepare<
     unknown,
     { account_id: string; body: string; updated_at: number }
@@ -483,6 +486,10 @@ export function open(path?: string) {
       } catch {
         return undefined;
       }
+    },
+
+    hasUsage(id: string) {
+      return (usageAny.get({ account_id: id })?.value ?? 0) > 0;
     },
 
     cacheUsage(id: string, body: Usage, at?: number) {

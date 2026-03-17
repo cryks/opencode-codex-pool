@@ -486,6 +486,17 @@ function selectionToast(
   });
 }
 
+function fetchingToast(client: Client) {
+  void client.tui.showToast({
+    body: {
+      title: "Codex Pool",
+      message: "Quota cache expired, fetching usage before selection",
+      variant: "info",
+      duration: 10_000,
+    },
+  });
+}
+
 function flipToast(client: Client, score: ScoreView, fast: boolean, note: string) {
   const detail = describe([score], "sticky session kept account", score.id);
   void client.tui.showToast({
@@ -1016,6 +1027,18 @@ function usageSource(store: Store, row: Row): UsageSource {
   return usageView(store, row).source;
 }
 
+function expiredUsage(store: Store, row: Row) {
+  return usageSource(store, row) === "missing" && store.hasUsage(row.id);
+}
+
+async function fetchExpiredUsage(store: Store, rows: Row[], client: Client) {
+  const expired = rows.filter((row) => expiredUsage(store, row));
+  if (expired.length === 0) return false;
+  fetchingToast(client);
+  await Promise.all(rows.map((row) => loadUsage(store, row)));
+  return true;
+}
+
 async function loadUsage(store: Store, row: Row) {
   const account = row.chatgpt_account_id;
   if (!account) return null;
@@ -1093,7 +1116,12 @@ async function ready(store: Store, row: Row, client: Client) {
   }
 }
 
-function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
+function rank(
+  store: Store,
+  rows: Row[],
+  affinity: Affinity,
+  warm = true,
+): RankResult {
   if (rows.length <= 1) {
     return {
       rows,
@@ -1109,7 +1137,7 @@ function rank(store: Store, rows: Row[], affinity: Affinity): RankResult {
     };
   }
 
-  const list = rows.map((row) => quota(store, row, true));
+  const list = rows.map((row) => quota(store, row, warm));
   if (list.some((item) => item.score === undefined)) {
     return {
       rows,
@@ -1283,7 +1311,8 @@ export function createFetch(
     const rows = await Promise.all(
       store.available().map((item) => ready(store, item, client)),
     );
-    const ranked = rank(store, rows, affinity);
+    const prefetched = await fetchExpiredUsage(store, rows, client);
+    const ranked = rank(store, rows, affinity, !prefetched);
     const ordered = ranked.rows;
     const list =
       ordered.length > 0
@@ -1292,7 +1321,7 @@ export function createFetch(
 
     if (candidate && list.length === 1) {
       const state = usageSource(store, list[0]);
-      if (state === "missing") {
+      if (state === "missing" && !prefetched) {
         await loadUsage(store, list[0]);
       }
       if (state === "stale") {

@@ -78,7 +78,7 @@ If the SQLite store is empty but opencode already has a valid primary OAuth reco
 - SQLite is the runtime source of truth for accounts, cooldowns, refresh locks, and shared usage cache.
 - The database runs in WAL mode so multiple opencode instances can share the same state.
 - Raw usage payloads are cached in SQLite for 60 seconds and reused across instances for both ranking and fast-mode.
-- When shared usage cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When shared usage cache data is stale but still within the 1-hour fallback window, requests reuse the stale payloads for the current foreground decision while warming fresh data in the background.
+- When shared usage cache data is missing, requests keep current priority order for the foreground request and warm cache data in the background. When shared usage cache data is stale but still within the 1-hour fallback window, requests reuse the stale payloads for the current foreground decision while warming fresh data in the background. When a cached usage entry exists but is older than that 1-hour fallback window, the foreground request first shows a `Quota cache expired, fetching usage before selection` toast, waits for the available accounts' usage fetches to finish, and only then runs account selection and shows the normal selection toast.
 - Only missing usage forces a synchronous warm-up before a single-account prompt attempt that could use fast-mode.
 - Successful token refresh clears the account's cached usage payload so future ranking and fast-mode decisions use fresh credentials.
 
