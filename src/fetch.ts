@@ -18,8 +18,8 @@ import {
 
 type Client = PluginInput["client"];
 type Row = NonNullable<ReturnType<Store["primary"]>>;
-const QUOTA_CACHE_MS = 60_000;
-const STALE_QUOTA_MS = 86_400_000;
+const QUOTA_CACHE_MS = 1 * 60 * 1000;
+const STALE_QUOTA_MS = 60 * 60 * 1000;
 const SWITCH_MARGIN = 0.2;
 const AFFINITY_MS = 300_000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);

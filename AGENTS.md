@@ -29,7 +29,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 - If a rate limit reports `allowed = false` or `limit_reached = true`, its score is 0 (fully blocked).
 - When `rate_limit` exposes multiple complete windows with a clear longest span, ranking treats the longest window as the main score and the shorter windows as guardrails instead of taking a hard minimum. The final routing score is `main_score * worst_guard_factor`, where each guard factor is `min(left_floor, 1 / (1 + debt))`, `debt = max(0, -normalized_guard_score)`, and `left_floor = remaining_capacity / 0.03` only when the guard window has less than `3%` remaining capacity. In that multi-window case, Pro plan weighting effectively lands on the longest window because the guard factor is derived from normalized guard health rather than plan-weighted raw score. If the windows cannot be reduced cleanly (for example, no clear longest complete window), ranking falls back to the previous conservative raw-window comparison. `additional_rate_limits` and `code_review_rate_limit` are ignored for account selection.
 - Raw usage payloads are cached in SQLite (`quota_cache`) for 60 seconds so multiple opencode instances share the same warm cache.
-- If the shared usage cache is stale but not too old (currently up to 24 hours), keep using the expired cached payloads for the current foreground decision and warm them in the background. `stale` is only a background-refresh signal; it must not change the foreground request into a blocking usage fetch. If the shared usage cache is cold (`missing`) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
+- If the shared usage cache is stale but not too old (currently up to 1 hour), keep using the expired cached payloads for the current foreground decision and warm them in the background. `stale` is only a background-refresh signal; it must not change the foreground request into a blocking usage fetch. If the shared usage cache is cold (`missing`) for either side, keep the current priority order and warm in the background. In both cases, do not block the foreground request waiting on usage.
 - Once quota scores are available for the full candidate set, reorder requests by score across the entire fleet rather than only at the `core`/`pool` boundary.
 - Failed or non-OK usage fetches do not write a negative cache entry. They leave ordering unchanged and allow the next request to retry warming.
 - Successful token refresh for an account must invalidate that account's shared usage cache before future ranking, because the old payload may have been computed from stale credentials.
@@ -129,7 +129,7 @@ For source-based local development, pointing at `src/index.ts` still works becau
 - `CONSERVATION_REF`: `14_400` (4 hours — tactical/strategic boundary)
 - `CONSERVATION_HORIZON`: `1_209_600` (2 weeks — conservation cap ceiling)
 - `CAPACITY_REF`: `1_800` (30 minutes — capacity normalization baseline)
-- Stale quota fallback horizon: `86_400_000` ms (24 hours)
+- Stale quota fallback horizon: `3_600_000` ms (1 hour)
 - DB default path: `~/.local/share/opencode/codex-pool.db`
 
 
