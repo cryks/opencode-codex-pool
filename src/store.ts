@@ -338,10 +338,10 @@ export function open(path?: string) {
     'DELETE FROM "lock" WHERE key = $key AND owner = $owner',
   );
   const usage = db.prepare<
-    { body: string },
+    { body: string; updated_at: number },
     { account_id: string; min_updated_at: number }
   >(
-    "SELECT body FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
+    "SELECT body, updated_at FROM quota_cache WHERE account_id = $account_id AND updated_at >= $min_updated_at",
   );
   const usageAny = db.prepare<Num, { account_id: string }>(
     "SELECT COUNT(*) AS value FROM quota_cache WHERE account_id = $account_id",
@@ -395,6 +395,23 @@ export function open(path?: string) {
     mark.run({ id, now });
     return true;
   });
+
+  function quota(id: string, maxAgeMs: number) {
+    const row = usage.get({
+      account_id: id,
+      min_updated_at: Date.now() - maxAgeMs,
+    });
+    if (!row) return undefined;
+
+    try {
+      return {
+        body: JSON.parse(row.body) as Usage,
+        updated_at: row.updated_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
 
   return {
     close() {
@@ -475,17 +492,11 @@ export function open(path?: string) {
     },
 
     usage(id: string, maxAgeMs: number) {
-      const row = usage.get({
-        account_id: id,
-        min_updated_at: Date.now() - maxAgeMs,
-      });
-      if (!row) return undefined;
+      return quota(id, maxAgeMs)?.body;
+    },
 
-      try {
-        return JSON.parse(row.body) as Usage;
-      } catch {
-        return undefined;
-      }
+    usageInfo(id: string, maxAgeMs: number) {
+      return quota(id, maxAgeMs);
     },
 
     hasUsage(id: string) {

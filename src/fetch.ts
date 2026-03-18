@@ -53,6 +53,7 @@ type UsageSource = "fresh" | "stale" | "missing";
 interface UsageView {
   body?: Usage;
   source: UsageSource;
+  at?: number;
 }
 
 interface ScoreView {
@@ -66,6 +67,7 @@ interface ScoreView {
   windows: ScoreWindow[];
   main?: ScoreWindow;
   guard?: ScoreGuard;
+  age?: string;
 }
 
 interface ScoreWindow {
@@ -262,6 +264,19 @@ function name(row: Row) {
   return row.label || row.email || row.id.slice(0, 8);
 }
 
+function ago(at: number) {
+  const secs = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function role(row: Row): "core" | "pool" {
   return row.primary === 1 ? "core" : "pool";
 }
@@ -271,20 +286,22 @@ function plan(row: Row) {
 }
 
 function usageView(store: Store, row: Row, warm = false): UsageView {
-  const fresh = store.usage(row.id, QUOTA_CACHE_MS);
+  const fresh = store.usageInfo(row.id, QUOTA_CACHE_MS);
   if (fresh !== undefined) {
     return {
-      body: fresh,
+      body: fresh.body,
       source: "fresh",
+      at: fresh.updated_at,
     };
   }
 
-  const stale = store.usage(row.id, STALE_QUOTA_MS);
+  const stale = store.usageInfo(row.id, STALE_QUOTA_MS);
   if (warm) void loadUsage(store, row);
   if (stale !== undefined) {
     return {
-      body: stale,
+      body: stale.body,
       source: "stale",
+      at: stale.updated_at,
     };
   }
 
@@ -308,6 +325,7 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
     windows: hit?.windows ?? [],
     main: hit?.main,
     guard: hit?.guard,
+    age: usage.source === "stale" && usage.at !== undefined ? ago(usage.at) : undefined,
   };
 }
 
@@ -336,7 +354,7 @@ function text(item: ScoreView, scoreWidth: number) {
 
 function title(item: ScoreView) {
   const tags = [
-    item.source === "stale" ? "cached" : null,
+    item.source === "stale" ? item.age ?? "cached" : null,
     item.score === 0 ? "blocked" : null,
   ].filter((value): value is string => value !== null);
   if (tags.length === 0) return item.name;

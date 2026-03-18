@@ -1751,7 +1751,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
           message: fastToast(
             true,
-            "Account:\n> [plus] fast-expire (cached):\n    [5h] 14.557",
+            "Account:\n> [plus] fast-expire (5m ago):\n    [5h] 14.557",
             "only available account",
             "ok",
             [
@@ -1768,7 +1768,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("shows cached and blocked tags next to the account name in a fixed order", async () => {
+  test("shows stale age and blocked tags next to the account name in a fixed order", async () => {
     store.upsert(row("stale-block", 0, { plan_type: "plus" }));
 
     const staleAt = Date.now() - 120_000;
@@ -1788,7 +1788,7 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain(
-      "Account:\n> [plus] stale-block (cached, blocked): 0.000",
+      "Account:\n> [plus] stale-block (2m ago, blocked): 0.000",
     );
   });
 

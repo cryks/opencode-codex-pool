@@ -195,16 +195,22 @@ describe("store", () => {
     const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
     const a = open(path);
     const b = open(path);
+    const at = Date.now();
 
     try {
       a.upsert(row("shared", 0));
-      a.cacheUsage("shared", scored(0.5));
+      a.cacheUsage("shared", scored(0.5), at);
 
       expect(b.usage("shared", 60_000)).toEqual(scored(0.5));
+      expect(b.usageInfo("shared", 60_000)).toEqual({
+        body: scored(0.5),
+        updated_at: at,
+      });
 
       a.clearUsage("shared");
 
       expect(b.usage("shared", 60_000)).toBeUndefined();
+      expect(b.usageInfo("shared", 60_000)).toBeUndefined();
     } finally {
       a.close();
       b.close();
