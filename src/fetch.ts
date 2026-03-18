@@ -400,20 +400,8 @@ function describe(scores: ScoreView[], reason: string, pick: string) {
   return lines.join("\n");
 }
 
-function fastLine(fast: boolean) {
-  return `Fast-mode ${fast ? "enabled" : "disabled"}`;
-}
-
-function bar(value: number, max = 1, fill = "*") {
-  const width = 8;
-  const scaled = clamp(value / max, 0, 1);
-  const size = scaled === 0 ? 0 : Math.max(1, Math.round(scaled * width));
-  return `[${fill.repeat(size)}${" ".repeat(width - size)}]`;
-}
-
-function metric(op: string, label: string, value: number, max = 1) {
-  const fill = value >= 0 ? "*" : "-";
-  return `${op} ${label.padEnd(6)} ${bar(Math.abs(value), max, fill)} ${(value >= 0 ? "+" : "") + value.toFixed(3)}`;
+function signed(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(3)}`;
 }
 
 function span(secs: number) {
@@ -473,41 +461,41 @@ function fastLimitTarget(label: string) {
   return `additional ${extra[1]}`;
 }
 
-function fastNote(info: FastView, account?: string) {
-  const lines = ["Fast:"];
-  if (account) lines.push(`account ${account}`);
-  const state = info.fast ? "enabled" : `disabled (${info.rule})`;
-  lines.push(`status  ${state}`);
-  if (info.main?.state === "scored" && typeof info.main.score === "number") {
-    lines.push(`main    ${info.main.target} ${info.main.score >= 0 ? "+" : ""}${info.main.score.toFixed(3)}`);
+function fastOff(info: FastView) {
+  if (info.rule === "manual") return "Fast: disabled (manual tier)";
+  if (info.rule === "blocked") return "Fast: disabled (blocked)";
+  if (info.rule === "no data") return "Fast: disabled (no data)";
+  if (info.rule === "low cap") {
+    return info.target
+      ? `Fast: disabled (cap<3%, ${info.target})`
+      : "Fast: disabled (cap<3%)";
   }
-  if (info.guards && info.guards.length > 0) {
-    const items = info.guards
-      .filter(
-        (item): item is FastWindowView & { score: number } =>
-          item.state === "scored" && typeof item.score === "number",
-      )
-      .map(
-        (item) => `${item.target} ${item.score >= 0 ? "+" : ""}${item.score.toFixed(3)}`,
-      );
-    if (items.length > 0) lines.push(`guards  ${items.join("  ")}`);
+  if (info.rule === "low score" && typeof info.score === "number") {
+    if (
+      info.main?.state === "scored" &&
+      typeof info.main.score === "number" &&
+      typeof info.cost === "number" &&
+      info.cost > 0
+    ) {
+      return `Fast: disabled (low score ${signed(info.score)} = main ${info.main.target} ${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
+    }
+    return `Fast: disabled (low score ${signed(info.score)})`;
   }
-  if (!info.main && info.target) {
-    lines.push(`target  ${info.target}`);
-  }
+  return `Fast: disabled (${info.rule})`;
+}
 
-  if (info.main?.state === "scored" && typeof info.main.score === "number") {
-    lines.push(metric("=", "base", info.main.score, 1));
+function fastNote(info: FastView) {
+  if (!info.fast) return fastOff(info);
+  if (typeof info.score !== "number") return "Fast: enabled";
+  if (
+    info.main?.state === "scored" &&
+    typeof info.main.score === "number" &&
+    typeof info.cost === "number" &&
+    info.cost > 0
+  ) {
+    return `Fast: enabled (${signed(info.score)} = main ${info.main.target} ${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
   }
-  if (typeof info.cost === "number" && info.cost > 0) {
-    lines.push(metric("-", "guard", info.cost, 1));
-  }
-  if (typeof info.score === "number") lines.push(metric("=", "final", info.score, 1));
-  if (info.detail?.state === "floor") {
-    lines.push(`need cap ${bar(FAST_MIN_LEFT)} ${FAST_MIN_LEFT.toFixed(3)}`);
-  }
-
-  return lines.join("\n");
+  return `Fast: enabled (${signed(info.score)})`;
 }
 
 function selectionToast(
@@ -515,14 +503,13 @@ function selectionToast(
   scores: ScoreView[],
   reason: string,
   pick: string,
-  fast: boolean,
   note: string,
 ) {
   const detail = describe(scores, reason, pick);
   void client.tui.showToast({
     body: {
       title: "Codex Pool",
-      message: `${fastLine(fast)}\n\n${detail}\n\n${note}`,
+      message: `${detail}\n\n${note}`,
       variant: "info",
       duration: 10_000,
     },
@@ -540,12 +527,12 @@ function fetchingToast(client: Client) {
   });
 }
 
-function flipToast(client: Client, score: ScoreView, fast: boolean, note: string) {
+function flipToast(client: Client, score: ScoreView, note: string) {
   const detail = describe([score], "sticky session kept account", score.id);
   void client.tui.showToast({
     body: {
       title: "Codex Pool",
-      message: `${fastLine(fast)}\n\n${detail}\n\n${note}`,
+      message: `${detail}\n\n${note}`,
       variant: "info",
       duration: 10_000,
     },
@@ -1151,18 +1138,17 @@ function attempt(
   init: RequestInit | undefined,
   parsed: JsonBody | undefined,
   usage: Usage | null,
-  account?: string,
   previous?: boolean,
 ) : AttemptResult {
   const info = explainFast(input, parsed, usage, previous);
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
-    return { init, fast: false, note: fastNote(info, account) };
+    return { init, fast: false, note: fastNote(info) };
   }
   const body = withPriority(parsed);
-  if (!body) return { init, fast: false, note: fastNote(info, account) };
+  if (!body) return { init, fast: false, note: fastNote(info) };
   if (!usage || !info.fast) {
-    return { init, fast: false, note: fastNote(info, account) };
+    return { init, fast: false, note: fastNote(info) };
   }
   return {
     init: {
@@ -1170,7 +1156,7 @@ function attempt(
       body: new TextEncoder().encode(JSON.stringify(body)).buffer,
     } satisfies RequestInit,
     fast: true,
-    note: fastNote(info, account),
+    note: fastNote(info),
   };
 }
 
@@ -1548,7 +1534,6 @@ export function createFetch(
           snap,
           parsed,
           cachedUsage(store, row),
-          name(row),
           sticky && affinity.id === row.id ? affinity.fast : undefined,
         );
         if (!sticky || affinity.id !== row.id) {
@@ -1561,11 +1546,10 @@ export function createFetch(
             scores,
             note ?? ranked.reason ?? "selected account",
             row.id,
-            used.fast,
             used.note,
           );
         } else if (affinity.fast !== undefined && affinity.fast !== used.fast) {
-          flipToast(client, current, used.fast, used.note);
+          flipToast(client, current, used.note);
         }
         let res = await send(input, used.init, row);
 
@@ -1577,7 +1561,6 @@ export function createFetch(
             snap,
             parsed,
             cachedUsage(store, row),
-            name(row),
             sticky && affinity.id === row.id ? affinity.fast : undefined,
           );
           res = await send(input, used.init, row);
