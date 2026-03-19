@@ -168,6 +168,7 @@ interface FastView {
   rule: string;
   target?: string;
   score?: number;
+  gate?: number;
   detail?: FastWindowView;
   windows: FastWindowView[];
   main?: FastWindowView;
@@ -447,6 +448,20 @@ function signed(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(3)}`;
 }
 
+function fastMargin(score: number, gate?: number) {
+  return typeof gate === "number" ? score - gate : score;
+}
+
+function gateTerm(gate?: number) {
+  if (typeof gate !== "number") return "";
+  return ` - gate ${Math.abs(gate).toFixed(3)}`;
+}
+
+function fastWrap(state: "enabled" | "disabled", score: string, detail?: string) {
+  if (!detail) return `Fast: ${state} ${score}`;
+  return `Fast: ${state} ${score}\n      (${detail})`;
+}
+
 function span(secs: number) {
   if (secs >= 86_400) {
     const value = secs / 86_400;
@@ -514,15 +529,22 @@ function fastOff(info: FastView) {
       : "Fast: disabled (cap<3%)";
   }
   if (info.rule === "low score" && typeof info.score === "number") {
+    const delta = signed(fastMargin(info.score, info.gate));
     if (
       info.main?.state === "scored" &&
       typeof info.main.score === "number" &&
       typeof info.cost === "number" &&
       info.cost > 0
     ) {
-      return `Fast: disabled (low score ${signed(info.score)} (${signed(info.main.score)} - guard ${info.cost.toFixed(3)}))`;
+      const gate = gateTerm(info.gate);
+      return fastWrap(
+        "disabled",
+        delta,
+        `${signed(info.main.score)} - guard ${info.cost.toFixed(3)}${gate}`,
+      );
     }
-    return `Fast: disabled (low score ${signed(info.score)})`;
+    const gate = gateTerm(info.gate);
+    return fastWrap("disabled", delta, `${signed(info.score)}${gate}`);
   }
   return `Fast: disabled (${info.rule})`;
 }
@@ -530,15 +552,22 @@ function fastOff(info: FastView) {
 function fastNote(info: FastView) {
   if (!info.fast) return fastOff(info);
   if (typeof info.score !== "number") return "Fast: enabled";
+  const delta = signed(fastMargin(info.score, info.gate));
   if (
     info.main?.state === "scored" &&
     typeof info.main.score === "number" &&
     typeof info.cost === "number" &&
     info.cost > 0
   ) {
-    return `Fast: enabled ${signed(info.score)} (${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
+    const gate = gateTerm(info.gate);
+    return fastWrap(
+      "enabled",
+      delta,
+      `${signed(info.main.score)} - guard ${info.cost.toFixed(3)}${gate}`,
+    );
   }
-  return `Fast: enabled ${signed(info.score)}`;
+  const gate = gateTerm(info.gate);
+  return fastWrap("enabled", delta, `${signed(info.score)}${gate}`);
 }
 
 function selectionToast(
@@ -905,6 +934,7 @@ function inspectFast(usage: Usage, previous?: boolean, age = 0): FastView {
     fast,
     rule: fast ? "ok" : "low score",
     score: hit.score,
+    gate,
     detail: hit.guard,
     main: hit.main,
     guards: hit.guards,
