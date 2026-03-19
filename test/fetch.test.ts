@@ -382,6 +382,52 @@ describe("createFetch", () => {
     expect(toasts[0]?.message).toContain("core-guard-rank:");
   });
 
+  test("applies aggressive guard pressure when a shorter window is far ahead of pace", async () => {
+    store.upsert(row("core-guard-pressure", 0, { primary: 1 }));
+    store.setPrimary("core-guard-pressure");
+    store.upsert(row("pool-guard-pressure", 1));
+    store.cacheUsage("core-guard-pressure", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 90,
+          reset_after_seconds: 7_380,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 10,
+          reset_after_seconds: 483_840,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+    store.cacheUsage("pool-guard-pressure", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 35,
+          reset_after_seconds: 302_400,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits[0]?.auth).toBe("Bearer pool-guard-pressure-access");
+    expect(toasts[0]?.message).toContain("guard x0.200");
+    expect(toasts[0]?.message).toContain("core-guard-pressure:");
+  });
+
   test("shows warming state when quota scores are not cached yet", async () => {
     store.upsert(row("core-warm", 0, { primary: 1 }));
     store.setPrimary("core-warm");

@@ -1028,11 +1028,11 @@ function guardScore(win: RankWindow, age = 0): ScoreGuard | null {
     } satisfies ScoreGuard;
   }
 
-  const debt = Math.max(0, -hit.score);
+  const factor = Math.min(floor, Math.min(1, Math.exp(hit.score)));
   return {
     label: win.label,
     name: win.name,
-    factor: Math.min(floor, 1 / (1 + debt)),
+    factor,
     score: hit.score,
   } satisfies ScoreGuard;
 }

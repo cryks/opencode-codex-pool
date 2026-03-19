@@ -137,7 +137,7 @@ Before a prompt is sent, the plugin shows a compact toast that includes:
 - quota score details
 - whether fast mode is enabled or disabled
 
-Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`.
+Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform.
 
 If stale quota cache is temporarily reused, the toast also shows the cache age. Guard-based ranking and fast-mode guard pressure both age cached windows by that elapsed cache time instead of treating the cached reset time as brand new.
 
