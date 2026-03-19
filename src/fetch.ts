@@ -332,9 +332,8 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
 function text(item: ScoreView, scoreWidth: number) {
   if (item.main && item.guard && item.score !== undefined) {
     return [
-      `final ${item.score.toFixed(3).padStart(scoreWidth)}`,
-      `[main ${item.main.name}] ${item.main.score.toFixed(3).padStart(scoreWidth)}`,
-      `[guard ${item.guard.name}] x${item.guard.factor.toFixed(3)}`,
+      item.score.toFixed(3).padStart(scoreWidth),
+      `(${item.main.score.toFixed(3).padStart(scoreWidth)} * [guard] x${item.guard.factor.toFixed(3)})`,
     ].join(" ");
   }
 

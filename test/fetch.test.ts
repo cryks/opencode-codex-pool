@@ -322,8 +322,13 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain("core-secondary:");
-    expect(toasts[0]?.message).toContain("[guard 5h]");
-    expect(toasts[0]?.message).toContain("[main 7d]");
+    expect(toasts[0]?.message).not.toContain("final ");
+    expect(toasts[0]?.message).toContain("[guard]");
+    expect(toasts[0]?.message).toContain("(");
+    expect(toasts[0]?.message).toContain(" * [guard] x");
+    expect(toasts[0]?.message).not.toContain("[guard 5h]");
+    expect(toasts[0]?.message).not.toContain("[main 7d]");
+    expect(toasts[0]?.message).not.toContain("[main]");
   });
 
   test("uses the longest rate window for ranking and applies the shorter window as a guard", async () => {
@@ -368,8 +373,12 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(hits[0]?.auth).toBe("Bearer pool-steady-rank-access");
-    expect(toasts[0]?.message).toContain("[main 7d]");
-    expect(toasts[0]?.message).toContain("[guard 5h]");
+    expect(toasts[0]?.message).not.toContain("final ");
+    expect(toasts[0]?.message).toContain("[guard]");
+    expect(toasts[0]?.message).toContain(" * [guard] x");
+    expect(toasts[0]?.message).not.toContain("[main 7d]");
+    expect(toasts[0]?.message).not.toContain("[guard 5h]");
+    expect(toasts[0]?.message).not.toContain("[main]");
     expect(toasts[0]?.message).toContain("core-guard-rank:");
   });
 
