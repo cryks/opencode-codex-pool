@@ -105,7 +105,7 @@ When the selected account still looks healthy, the plugin can add `service_tier:
 - Caller-provided `service_tier` or `serviceTier` always wins
 - If the account looks constrained, fast mode stays off
 
-You will see the fast-mode decision in the pre-request toast.
+You will see the fast-mode decision in the pre-request toast, using a compact score summary like `Fast: enabled +1.011 (+1.593 - guard 0.582)` when guard pressure applies.
 
 ## Sticky session affinity
 
@@ -135,6 +135,8 @@ Before a prompt is sent, the plugin shows a compact toast that includes:
 - a short reason for the choice
 - quota score details
 - whether fast mode is enabled or disabled
+
+Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`.
 
 If stale quota cache is temporarily reused, the toast also shows the cache age.
 

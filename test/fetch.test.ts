@@ -57,9 +57,9 @@ function fastToast(
   const note = (() => {
     if (fast) {
       if (final && main && guard && Number(guard) > 0) {
-        return `Fast: enabled (${signed(final)} = main ${main[1]} ${main[2]} - guard ${Number(guard).toFixed(3)})`;
+        return `Fast: enabled ${signed(final)} (${main[2]} - guard ${Number(guard).toFixed(3)})`;
       }
-      if (final) return `Fast: enabled (${signed(final)})`;
+      if (final) return `Fast: enabled ${signed(final)}`;
       return "Fast: enabled";
     }
 
@@ -71,7 +71,7 @@ function fastToast(
     }
     if (rule === "low score" && final) {
       if (main && guard && Number(guard) > 0) {
-        return `Fast: disabled (low score ${signed(final)} = main ${main[1]} ${main[2]} - guard ${Number(guard).toFixed(3)})`;
+        return `Fast: disabled (low score ${signed(final)} (${main[2]} - guard ${Number(guard).toFixed(3)}))`;
       }
       return `Fast: disabled (low score ${signed(final)})`;
     }
@@ -323,9 +323,9 @@ describe("createFetch", () => {
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain("core-secondary:");
     expect(toasts[0]?.message).not.toContain("final ");
-    expect(toasts[0]?.message).toContain("[guard]");
+    expect(toasts[0]?.message).toContain("guard x");
     expect(toasts[0]?.message).toContain("(");
-    expect(toasts[0]?.message).toContain(" * [guard] x");
+    expect(toasts[0]?.message).toContain(" * guard x");
     expect(toasts[0]?.message).not.toContain("[guard 5h]");
     expect(toasts[0]?.message).not.toContain("[main 7d]");
     expect(toasts[0]?.message).not.toContain("[main]");
@@ -374,8 +374,8 @@ describe("createFetch", () => {
     expect(res.status).toBe(200);
     expect(hits[0]?.auth).toBe("Bearer pool-steady-rank-access");
     expect(toasts[0]?.message).not.toContain("final ");
-    expect(toasts[0]?.message).toContain("[guard]");
-    expect(toasts[0]?.message).toContain(" * [guard] x");
+    expect(toasts[0]?.message).toContain("guard x");
+    expect(toasts[0]?.message).toContain(" * guard x");
     expect(toasts[0]?.message).not.toContain("[main 7d]");
     expect(toasts[0]?.message).not.toContain("[guard 5h]");
     expect(toasts[0]?.message).not.toContain("[main]");
@@ -1394,8 +1394,8 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled (+0.806)");
-    expect(message.endsWith("Fast: enabled (+0.806)")).toBe(true);
+    expect(message).toContain("Fast: enabled +0.806");
+    expect(message.endsWith("Fast: enabled +0.806")).toBe(true);
   });
 
   test("attributes multi-account fast-mode details to the selected account", async () => {
@@ -1507,7 +1507,7 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled (+0.806)");
+    expect(message).toContain("Fast: enabled +0.806");
     expect(message).not.toContain("additional 1");
     expect(body(hits[0])).toEqual({
       model: "gpt-5",
@@ -2239,7 +2239,7 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[toasts.length - 1]?.message ?? "";
-    expect(message).toContain("Fast: enabled (+0.806)");
+    expect(message).toContain("Fast: enabled +0.806");
     expect(message).not.toContain("additional 1 primary");
   });
 
@@ -2294,9 +2294,9 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled (+0.806)");
+    expect(message).toContain("Fast: enabled +0.806");
     expect(message).not.toContain("additional 1 primary");
-    expect(message.endsWith("Fast: enabled (+0.806)")).toBe(true);
+    expect(message.endsWith("Fast: enabled +0.806")).toBe(true);
   });
 
   test("ignores incomplete additional rate limits when rate_limit is complete", async () => {

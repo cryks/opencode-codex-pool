@@ -371,7 +371,7 @@ function text(item: ScoreView, scoreWidth: number) {
   if (item.main && item.guard && item.score !== undefined) {
     return [
       item.score.toFixed(3).padStart(scoreWidth),
-      `(${item.main.score.toFixed(3).padStart(scoreWidth)} * [guard] x${item.guard.factor.toFixed(3)})`,
+      `(${item.main.score.toFixed(3).padStart(scoreWidth)} * guard x${item.guard.factor.toFixed(3)})`,
     ].join(" ");
   }
 
@@ -514,7 +514,7 @@ function fastOff(info: FastView) {
       typeof info.cost === "number" &&
       info.cost > 0
     ) {
-      return `Fast: disabled (low score ${signed(info.score)} = main ${info.main.target} ${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
+      return `Fast: disabled (low score ${signed(info.score)} (${signed(info.main.score)} - guard ${info.cost.toFixed(3)}))`;
     }
     return `Fast: disabled (low score ${signed(info.score)})`;
   }
@@ -530,9 +530,9 @@ function fastNote(info: FastView) {
     typeof info.cost === "number" &&
     info.cost > 0
   ) {
-    return `Fast: enabled (${signed(info.score)} = main ${info.main.target} ${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
+    return `Fast: enabled ${signed(info.score)} (${signed(info.main.score)} - guard ${info.cost.toFixed(3)})`;
   }
-  return `Fast: enabled (${signed(info.score)})`;
+  return `Fast: enabled ${signed(info.score)}`;
 }
 
 function selectionToast(
