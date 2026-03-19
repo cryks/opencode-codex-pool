@@ -1076,7 +1076,8 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({
+    const prompt = hits.find((item) => item.url === CODEX_API_ENDPOINT);
+    expect(prompt && body(prompt)).toEqual({
       model: "gpt-5",
       input: "hi",
       service_tier: "priority",
@@ -1125,7 +1126,8 @@ describe("createFetch", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(body(hits[0])).toEqual({
+    const prompt = hits.find((item) => item.url === CODEX_API_ENDPOINT);
+    expect(prompt && body(prompt)).toEqual({
       model: "gpt-5",
       input: "hi",
       service_tier: "priority",
@@ -1297,6 +1299,97 @@ describe("createFetch", () => {
       input: "hi",
       service_tier: "priority",
     });
+  });
+
+  test("ages stale cached guard windows when ranking accounts", async () => {
+    store.upsert(row("core-stale-guard", 0, { primary: 1, expires_at: Date.now() + 20_000_000 }));
+    store.setPrimary("core-stale-guard");
+    store.upsert(row("pool-stale-guard", 1, { expires_at: Date.now() + 20_000_000 }));
+
+    const base = Date.now();
+    store.cacheUsage(
+      "core-stale-guard",
+      {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 95,
+            reset_after_seconds: 4_800,
+            limit_window_seconds: 18_000,
+          },
+          secondary_window: {
+            used_percent: 10,
+            reset_after_seconds: 483_840,
+            limit_window_seconds: 604_800,
+          },
+        },
+      },
+      base,
+    );
+    store.cacheUsage("pool-stale-guard", scored(2.2), base);
+    Date.now = () => base + 3_000_000;
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits[0]?.auth).toBe("Bearer core-stale-guard-access");
+  });
+
+  test("ages stale cached guard windows when deciding fast-mode", async () => {
+    store.upsert(row("fast-stale-guard", 0, { expires_at: Date.now() + 20_000_000 }));
+
+    const base = Date.now();
+    store.cacheUsage(
+      "fast-stale-guard",
+      {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 95,
+            reset_after_seconds: 4_800,
+            limit_window_seconds: 18_000,
+          },
+          secondary_window: {
+            used_percent: 79,
+            reset_after_seconds: 60_480,
+            limit_window_seconds: 604_800,
+          },
+        },
+      },
+      base,
+    );
+    Date.now = () => base + 3_000_000;
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    const prompt = hits.find((item) => item.url === CODEX_API_ENDPOINT);
+    expect(prompt && body(prompt)).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    expect(toasts[0]?.message).toContain("Fast: enabled +0.067 (+0.806 - guard 0.739)");
   });
 
   test("shows fast-mode enabled in the account switch toast", async () => {

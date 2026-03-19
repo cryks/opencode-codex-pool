@@ -57,6 +57,11 @@ interface UsageView {
   at?: number;
 }
 
+function cacheAge(at?: number) {
+  if (at === undefined) return 0;
+  return Math.max(0, (Date.now() - at) / 1000);
+}
+
 interface ScoreView {
   id: string;
   name: string;
@@ -155,6 +160,7 @@ interface FastWindowView {
   left?: number;
   span?: number;
   dormant?: boolean;
+  ready?: ReadyWindow;
 }
 
 interface FastView {
@@ -350,7 +356,7 @@ function usageView(store: Store, row: Row, warm = false): UsageView {
 
 function quota(store: Store, row: Row, warm = false): ScoreView {
   const usage = usageView(store, row, warm);
-  const hit = usage.body ? score(usage.body) : null;
+  const hit = usage.body ? score(usage.body, cacheAge(usage.at)) : null;
 
   return {
     id: row.id,
@@ -697,10 +703,19 @@ function balanced(win: ReadyWindow): Window {
   } satisfies Window;
 }
 
-function normalized(win: ReadyWindow, plan: number) {
-  const raw = windowScore(win, plan);
+function aged(win: ReadyWindow, age = 0): ReadyWindow {
+  if (age <= 0) return win;
+  return {
+    ...win,
+    reset_after_seconds: Math.max(0, win.reset_after_seconds - age),
+  } satisfies ReadyWindow;
+}
+
+function normalized(win: ReadyWindow, plan: number, age = 0) {
+  const current = aged(win, age);
+  const raw = windowScore(current, plan);
   if (typeof raw !== "number" || raw <= 0) return null;
-  const base = windowScore(balanced(win), plan);
+  const base = windowScore(balanced(current), plan);
   if (typeof base !== "number" || base <= 0) return null;
   return {
     raw,
@@ -709,7 +724,11 @@ function normalized(win: ReadyWindow, plan: number) {
   };
 }
 
-function inspectFastWindow(label: string, win?: Window, plan = 1): FastWindowView | undefined {
+function inspectFastWindow(
+  label: string,
+  win: Window | undefined,
+  plan = 1,
+): FastWindowView | undefined {
   if (!win) return undefined;
 
   const item = readyWindow(win);
@@ -754,10 +773,15 @@ function inspectFastWindow(label: string, win?: Window, plan = 1): FastWindowVie
     left,
     span: item.limit_window_seconds,
     dormant: idle,
+    ready: item,
   } satisfies FastWindowView;
 }
 
-function inspectFastLimit(label: string, limit: Limit | undefined, plan: number): FastWindowView[] {
+function inspectFastLimit(
+  label: string,
+  limit: Limit | undefined,
+  plan: number,
+): FastWindowView[] {
   if (!limit) return [];
   if (blocked(limit)) {
     return [
@@ -782,7 +806,7 @@ function inspectFastUsage(usage: Usage) {
   return [...inspectFastLimit("rate", usage.rate_limit, plan)];
 }
 
-function profile(windows: FastWindowView[]): FastProfile | null {
+function profile(windows: FastWindowView[], age = 0): FastProfile | null {
   const rate = windows.filter(
     (item): item is FastWindowView & { score: number; span: number } =>
       item.label.startsWith("rate.") &&
@@ -801,9 +825,14 @@ function profile(windows: FastWindowView[]): FastProfile | null {
       typeof item.span === "number",
   );
   const guard = guards.reduce<FastProfile["guard"]>((worst, item) => {
-    if (!worst) return item;
+    const adjusted = item.ready ? normalized(item.ready, 1, age)?.score ?? item.score : item.score;
+    const next = {
+      ...item,
+      score: adjusted,
+    } satisfies FastWindowView;
+    if (!worst) return next;
     const score = worst.score ?? Number.POSITIVE_INFINITY;
-    return item.score < score ? item : worst;
+    return adjusted < score ? next : worst;
   }, undefined);
   const cost = Math.max(0, -(guard?.score ?? 0));
   return {
@@ -815,7 +844,7 @@ function profile(windows: FastWindowView[]): FastProfile | null {
   } satisfies FastProfile;
 }
 
-function inspectFast(usage: Usage, previous?: boolean): FastView {
+function inspectFast(usage: Usage, previous?: boolean, age = 0): FastView {
   const windows = inspectFastUsage(usage);
   const rate = windows.filter((item) => item.label.startsWith("rate."));
 
@@ -861,7 +890,7 @@ function inspectFast(usage: Usage, previous?: boolean): FastView {
     };
   }
 
-  const hit = profile(windows);
+  const hit = profile(windows, age);
   if (!hit) {
     return {
       fast: false,
@@ -889,6 +918,7 @@ function explainFast(
   parsed: JsonBody | undefined,
   usage: Usage | null,
   previous?: boolean,
+  age = 0,
 ): FastView {
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
@@ -927,7 +957,7 @@ function explainFast(
     };
   }
 
-  return inspectFast(usage, previous);
+  return inspectFast(usage, previous, age);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -983,12 +1013,12 @@ function rankWindow(label: string, win: Window | undefined, plan: number): RankW
   } satisfies RankWindow;
 }
 
-function guardScore(win: RankWindow): ScoreGuard | null {
+function guardScore(win: RankWindow, age = 0): ScoreGuard | null {
   if (!win.ready) return null;
   const used = clamp(win.ready.used_percent, 0, 100);
   const left = 1 - used / 100;
   const floor = left < FAST_MIN_LEFT ? left / FAST_MIN_LEFT : 1;
-  const hit = normalized(win.ready, 1);
+  const hit = normalized(win.ready, 1, age);
   if (!hit) {
     return {
       label: win.label,
@@ -1007,7 +1037,7 @@ function guardScore(win: RankWindow): ScoreGuard | null {
   } satisfies ScoreGuard;
 }
 
-function reduceScore(list: RankWindow[]): ScoreHit | null {
+function reduceScore(list: RankWindow[], age = 0): ScoreHit | null {
   if (list.length < 2) return null;
   const full = list.filter(
     (item): item is RankWindow & { ready: ReadyWindow; span: number } =>
@@ -1020,7 +1050,7 @@ function reduceScore(list: RankWindow[]): ScoreHit | null {
   if (guards.length === 0) return null;
 
   const guard = guards.reduce<ScoreGuard | undefined>((worst, item) => {
-    const next = guardScore(item);
+    const next = guardScore(item, age);
     if (!next) return worst;
     if (!worst) return next;
     return next.factor < worst.factor ? next : worst;
@@ -1040,7 +1070,12 @@ function reduceScore(list: RankWindow[]): ScoreHit | null {
   } satisfies ScoreHit;
 }
 
-function limitScore(label: string, limit: Limit | undefined, plan: number): ScoreHit | null {
+function limitScore(
+  label: string,
+  limit: Limit | undefined,
+  plan: number,
+  age = 0,
+): ScoreHit | null {
   if (!limit) return null;
   if (blocked(limit)) return { score: 0, label, windows: [] };
 
@@ -1055,7 +1090,7 @@ function limitScore(label: string, limit: Limit | undefined, plan: number): Scor
 
   if (list.length === 0) return null;
 
-  const reduced = reduceScore(list);
+  const reduced = reduceScore(list, age);
   if (reduced) return reduced;
 
   const best = list.reduce((win, item) => (item.score < win.score ? item : win));
@@ -1066,9 +1101,9 @@ function limitScore(label: string, limit: Limit | undefined, plan: number): Scor
   };
 }
 
-function score(body: Usage): ScoreHit | null {
+function score(body: Usage, age = 0): ScoreHit | null {
   const plan = weight(body.plan_type);
-  const list = [limitScore("rate", body.rate_limit, plan)];
+  const list = [limitScore("rate", body.rate_limit, plan, age)];
 
   const blocked = list.find((item) => item?.score === 0);
   if (blocked) return blocked;
@@ -1087,7 +1122,7 @@ function score(body: Usage): ScoreHit | null {
 }
 
 function cachedUsage(store: Store, row: Row) {
-  return usageView(store, row).body ?? null;
+  return usageView(store, row);
 }
 
 function usageSource(store: Store, row: Row): UsageSource {
@@ -1174,23 +1209,24 @@ function attempt(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   parsed: JsonBody | undefined,
-  usage: Usage | null,
+  usage: UsageView,
   previous?: boolean,
 ) : AttemptResult {
-  const info = explainFast(input, parsed, usage, previous);
+  const body = usage.body ?? null;
+  const info = explainFast(input, parsed, body, previous, cacheAge(usage.at));
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
     return { init, fast: false, note: fastNote(info) };
   }
-  const body = withPriority(parsed);
-  if (!body) return { init, fast: false, note: fastNote(info) };
-  if (!usage || !info.fast) {
+  const next = withPriority(parsed);
+  if (!next) return { init, fast: false, note: fastNote(info) };
+  if (!body || !info.fast) {
     return { init, fast: false, note: fastNote(info) };
   }
   return {
     init: {
       ...init,
-      body: new TextEncoder().encode(JSON.stringify(body)).buffer,
+      body: new TextEncoder().encode(JSON.stringify(next)).buffer,
     } satisfies RequestInit,
     fast: true,
     note: fastNote(info),

@@ -124,6 +124,7 @@ This gives you better cache reuse without ignoring quota health.
 - SQLite is the runtime source of truth for accounts, cooldowns, token refresh locks, and quota cache
 - WAL mode is enabled so multiple opencode processes can share the same state
 - Quota data is cached and reused across processes
+- When cached quota data is reused, guard calculations age the cached window by the cache elapsed time before applying guard pressure
 
 In short: one shared local database coordinates the whole pool.
 
@@ -138,7 +139,7 @@ Before a prompt is sent, the plugin shows a compact toast that includes:
 
 Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`.
 
-If stale quota cache is temporarily reused, the toast also shows the cache age.
+If stale quota cache is temporarily reused, the toast also shows the cache age. Guard-based ranking and fast-mode guard pressure both age cached windows by that elapsed cache time instead of treating the cached reset time as brand new.
 
 ## Limits and behavior to know about
 
