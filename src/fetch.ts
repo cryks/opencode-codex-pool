@@ -18,6 +18,7 @@ import {
 
 type Client = PluginInput["client"];
 type Row = NonNullable<ReturnType<Store["primary"]>>;
+type UsageHit = NonNullable<ReturnType<Store["usageInfo"]>>;
 const QUOTA_CACHE_MS = 1 * 60 * 1000;
 const STALE_QUOTA_MS = 60 * 60 * 1000;
 const USAGE_POLL_MS = 30 * 1000;
@@ -285,8 +286,45 @@ function plan(row: Row) {
   return row.plan_type ?? "unknown";
 }
 
+function resetDeadline(hit: UsageHit) {
+  const list = [
+    hit.body.rate_limit?.primary_window,
+    hit.body.rate_limit?.secondary_window,
+  ].flatMap((win) => {
+    if (!win) return [];
+
+    const used = win.used_percent;
+    if (typeof used !== "number" || !Number.isFinite(used)) return [];
+
+    const after = win.reset_after_seconds;
+    if (typeof after !== "number" || !Number.isFinite(after) || after < 0) {
+      return [];
+    }
+
+    const value = clamp(used, 0, 100);
+    if (dormant(win, value)) return [];
+    return [hit.updated_at + after * 1000];
+  });
+
+  if (list.length === 0) return null;
+  return Math.min(...list);
+}
+
+function resetExpired(hit: UsageHit) {
+  const at = resetDeadline(hit);
+  if (at === null) return false;
+  return Date.now() >= at;
+}
+
+function cachedInfo(store: Store, row: Row, maxAgeMs: number) {
+  const hit = store.usageInfo(row.id, maxAgeMs);
+  if (hit === undefined) return undefined;
+  if (resetExpired(hit)) return undefined;
+  return hit;
+}
+
 function usageView(store: Store, row: Row, warm = false): UsageView {
-  const fresh = store.usageInfo(row.id, QUOTA_CACHE_MS);
+  const fresh = cachedInfo(store, row, QUOTA_CACHE_MS);
   if (fresh !== undefined) {
     return {
       body: fresh.body,
@@ -295,7 +333,7 @@ function usageView(store: Store, row: Row, warm = false): UsageView {
     };
   }
 
-  const stale = store.usageInfo(row.id, STALE_QUOTA_MS);
+  const stale = cachedInfo(store, row, STALE_QUOTA_MS);
   if (warm) void loadUsage(store, row);
   if (stale !== undefined) {
     return {
@@ -1073,8 +1111,8 @@ async function waitUsage(store: Store, row: Row, maxAgeMs: number) {
 
   for (let i = 0; i < tries; i += 1) {
     await new Promise((r) => setTimeout(r, 250));
-    const cached = store.usage(row.id, maxAgeMs);
-    if (cached !== undefined) return cached;
+    const cached = cachedInfo(store, row, maxAgeMs);
+    if (cached !== undefined) return cached.body;
   }
 
   return undefined;
@@ -1084,8 +1122,8 @@ async function loadUsage(store: Store, row: Row, maxAgeMs = QUOTA_CACHE_MS) {
   const account = row.chatgpt_account_id;
   if (!account) return null;
 
-  const cached = store.usage(row.id, maxAgeMs);
-  if (cached !== undefined) return cached;
+  const cached = cachedInfo(store, row, maxAgeMs);
+  if (cached !== undefined) return cached.body;
 
   const held = loadingUsage.get(row.id);
   if (held) return held;
@@ -1101,13 +1139,13 @@ async function loadUsage(store: Store, row: Row, maxAgeMs = QUOTA_CACHE_MS) {
 
       locked = store.acquireLock(key, owner, USAGE_FETCH_LEASE_MS);
       if (!locked) {
-        return store.usage(row.id, STALE_QUOTA_MS) ?? null;
+        return cachedInfo(store, row, STALE_QUOTA_MS)?.body ?? null;
       }
     }
 
     try {
-      const shared = store.usage(row.id, maxAgeMs);
-      if (shared !== undefined) return shared;
+      const shared = cachedInfo(store, row, maxAgeMs);
+      if (shared !== undefined) return shared.body;
 
       const headers = new Headers();
       headers.set("authorization", `Bearer ${row.access_token}`);
