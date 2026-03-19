@@ -89,6 +89,13 @@ At a high level, routing is simple:
 
 The scoring is quota-aware, not round-robin. That means the plugin tries to spend capacity where it is most available instead of rotating blindly.
 
+Untouched dormant windows are handled as a separate one-shot rule rather than as a score boost:
+
+- If an account has any untouched dormant `rate_limit` window, that account is promoted ahead of normal score ordering for one successful request
+- A dormant window means `used_percent = 0` and `reset_after_seconds === limit_window_seconds`
+- After one successful request on that account, the same dormant window stops receiving priority for 30 minutes
+- That touch suppression is stored in SQLite, so other opencode processes do not keep re-prioritizing the same cached dormant window
+
 ## Primary account vs pool accounts
 
 - `primary`: your default `openai` account in opencode, mirrored as the main OAuth account; this is what keeps opencode in Codex mode
@@ -123,6 +130,7 @@ This gives you better cache reuse without ignoring quota health.
 
 - Database path: `~/.local/share/opencode/codex-pool.db`
 - SQLite is the runtime source of truth for accounts, cooldowns, token refresh locks, and quota cache
+- SQLite also stores dormant-window touch suppression shared across processes
 - WAL mode is enabled so multiple opencode processes can share the same state
 - Quota data is cached and reused across processes
 - When cached quota data is reused, guard calculations age the cached window by the cache elapsed time before applying guard pressure
@@ -138,7 +146,7 @@ Before a prompt is sent, the plugin shows a compact toast that includes:
 - quota score details
 - whether fast mode is enabled or disabled
 
-Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform.
+Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform. Dormant-window priority is applied before this normal score ordering and is not folded into the score itself.
 
 If stale quota cache is temporarily reused, the toast also shows the cache age. Guard-based ranking and fast-mode guard pressure both age cached windows by that elapsed cache time instead of treating the cached reset time as brand new.
 

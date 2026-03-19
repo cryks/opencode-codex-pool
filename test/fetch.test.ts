@@ -21,6 +21,10 @@ import {
 import type { Account, Usage } from "../src/types";
 
 const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
+const CONSERVATION_REF = 14_400;
+const HEALTH_RANGE = 0.2;
+const HEALTH_BONUS = 0.12;
+const HEALTH_PENALTY = 0.18;
 
 interface Hit {
   url: string;
@@ -165,13 +169,36 @@ function scored(score: number, plan = "plus"): Usage {
   }
 
   const weight = plan === "pro" ? PRO_PLAN_WEIGHT : 1;
-  const span = CAPACITY_REF * (score / weight) ** 2;
+  const span = CAPACITY_REF * 10;
+  const reset = 300;
+  const cap = Math.sqrt(span / CAPACITY_REF);
+  const time = reset / span;
+  const conservation = Math.max(1, 1 + Math.log(reset / CONSERVATION_REF));
+  const value = (left: number) => {
+    const health = left - time;
+    const scaled = Math.min(Math.max(health / HEALTH_RANGE, -1), 1);
+    const factor =
+      scaled >= 0 ? 1 + HEALTH_BONUS * scaled : 1 + HEALTH_PENALTY * scaled;
+    return ((weight * left * cap) / (time * conservation)) * factor;
+  };
+
+  let low = 0;
+  let high = 1;
+  for (let i = 0; i < 60; i += 1) {
+    const mid = (low + high) / 2;
+    if (value(mid) >= score) {
+      high = mid;
+      continue;
+    }
+    low = mid;
+  }
+
   return {
     plan_type: plan,
     rate_limit: {
       primary_window: {
-        used_percent: 0,
-        reset_after_seconds: span,
+        used_percent: (1 - high) * 100,
+        reset_after_seconds: reset,
         limit_window_seconds: span,
       },
     },
@@ -253,7 +280,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     const res = await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -290,7 +317,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-toast:\n    [7.5m] 0.500\n> [unknown] pool-toast:\n    [19.2m] 0.800",
+            "Accounts:\n  [unknown] core-toast:\n    [5h] 0.500\n> [unknown] pool-toast:\n    [5h] 0.800",
           "higher score",
           "no data",
           [],
@@ -682,7 +709,7 @@ describe("createFetch", () => {
         expect(toasts[0]?.message).toBe(
           fastToast(
             false,
-            "Accounts:\n  [unknown] core-before:\n    [7.5m] 0.500\n> [unknown] pool-before:\n    [19.2m] 0.800",
+            "Accounts:\n  [unknown] core-before:\n    [5h] 0.500\n> [unknown] pool-before:\n    [5h] 0.800",
             "higher score",
             "no data",
             [],
@@ -782,7 +809,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     const res = await run("https://api.openai.com/v1/responses");
 
@@ -829,7 +856,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [unknown] core-429:\n    [24.3m] 0.900\n  [unknown] pool-429:\n    [4.8m] 0.400",
+            "Accounts:\n> [unknown] core-429:\n    [5h] 0.900\n  [unknown] pool-429:\n    [5h] 0.400",
           "higher score",
           "no data",
           [],
@@ -843,7 +870,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-429:\n    [24.3m] 0.900\n> [unknown] pool-429:\n    [4.8m] 0.400",
+            "Accounts:\n  [unknown] core-429:\n    [5h] 0.900\n> [unknown] pool-429:\n    [5h] 0.400",
           "core-429 hit 429 cooldown",
           "no data",
           [],
@@ -891,7 +918,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [plus] account1@foobar.com:\n    [317.5d] 123.456\n  [pro]  account2@a.com:\n    [10.4h]   4.567",
+            "Accounts:\n> [plus] account1@foobar.com:\n    [5h] 123.456\n  [pro]  account2@a.com:\n    [5h]   4.567",
           "higher score",
           "no data",
           [],
@@ -922,7 +949,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
 
     await run("https://api.openai.com/v1/responses");
@@ -964,7 +991,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-compare:\n    [7.5m] 0.500\n  [unknown] pool-first:\n    [19.2m] 0.800\n> [unknown] pool-second:\n    [43.2m] 1.200",
+            "Accounts:\n  [unknown] core-compare:\n    [5h] 0.500\n  [unknown] pool-first:\n    [5h] 0.800\n> [unknown] pool-second:\n    [5h] 1.200",
           "higher score",
           "no data",
           [],
@@ -1013,7 +1040,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n> [unknown] core-fallback:\n    [24.3m] 0.900\n  [unknown] pool-first-fallback:\n    [19.2m] 0.800\n  [unknown] pool-second-fallback:\n    [14.7m] 0.700",
+            "Accounts:\n> [unknown] core-fallback:\n    [5h] 0.900\n  [unknown] pool-first-fallback:\n    [5h] 0.800\n  [unknown] pool-second-fallback:\n    [5h] 0.700",
           "higher score",
           "no data",
           [],
@@ -1027,7 +1054,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-fallback:\n    [24.3m] 0.900\n> [unknown] pool-first-fallback:\n    [19.2m] 0.800\n  [unknown] pool-second-fallback:\n    [14.7m] 0.700",
+            "Accounts:\n  [unknown] core-fallback:\n    [5h] 0.900\n> [unknown] pool-first-fallback:\n    [5h] 0.800\n  [unknown] pool-second-fallback:\n    [5h] 0.700",
           "core-fallback hit 429 cooldown",
           "no data",
           [],
@@ -1041,7 +1068,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] core-fallback:\n    [24.3m] 0.900\n  [unknown] pool-first-fallback:\n    [19.2m] 0.800\n> [unknown] pool-second-fallback:\n    [14.7m] 0.700",
+            "Accounts:\n  [unknown] core-fallback:\n    [5h] 0.900\n  [unknown] pool-first-fallback:\n    [5h] 0.800\n> [unknown] pool-second-fallback:\n    [5h] 0.700",
           "pool-first-fallback hit 429 cooldown",
           "no data",
           [],
@@ -1076,7 +1103,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     const res = await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -1117,7 +1144,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -1167,7 +1194,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -1217,7 +1244,7 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
     await run("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -3147,7 +3174,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("prioritizes untouched first-use windows to start their clock", async () => {
+  test("touches dormant windows once before returning to score-based ranking", async () => {
     store.upsert(row("core-dormant", 0, { primary: 1 }));
     store.setPrimary("core-dormant");
     store.upsert(row("pool-active", 1));
@@ -3178,8 +3205,8 @@ describe("createFetch", () => {
           plan_type: "plus",
           rate_limit: {
             primary_window: {
-              used_percent: 25,
-              reset_after_seconds: 14_400,
+              used_percent: 10,
+              reset_after_seconds: 300,
               limit_window_seconds: 18_000,
             },
           },
@@ -3190,21 +3217,163 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
 
     await run("https://api.openai.com/v1/responses");
     await Bun.sleep(0);
-    const second = await run("https://api.openai.com/v1/responses");
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const third = await run("https://api.openai.com/v1/responses");
 
-    expect(second.status).toBe(200);
+    expect(third.status).toBe(200);
     expect(hits).toEqual([
       "Bearer core-dormant-access",
       "Bearer core-dormant-access",
+      "Bearer pool-active-access",
     ]);
+    expect(
+      toasts.some((item) => item.message.includes("Because: touch dormant rate.primary")),
+    ).toBeTrue();
   });
 
-  test("treats zero-used windows as active once their countdown has started", async () => {
+  test("persists dormant touches across fetch instances while cached usage stays dormant", async () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
+    const first = open(path);
+    const second = open(path);
+
+    try {
+      first.upsert(row("core-shared-dormant", 0, { primary: 1 }));
+      first.setPrimary("core-shared-dormant");
+      first.upsert(row("pool-shared-active", 1));
+      first.cacheUsage("core-shared-dormant", {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 0,
+            reset_after_seconds: 18_000,
+            limit_window_seconds: 18_000,
+          },
+        },
+      });
+      first.cacheUsage("pool-shared-active", {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 1,
+            reset_after_seconds: 60,
+            limit_window_seconds: 18_000,
+          },
+        },
+      });
+
+      const hits: string[] = [];
+      globalThis.fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        const auth = new Headers(init?.headers).get("authorization");
+
+        hits.push(auth ?? "");
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+
+      const runA = createFetch(first, async () => auth(), stub().client);
+      const runB = createFetch(second, async () => auth(), stub().client);
+
+      await runA("https://api.openai.com/v1/responses");
+      await Bun.sleep(0);
+      const next = await runB("https://api.openai.com/v1/responses");
+
+      expect(next.status).toBe(200);
+      expect(hits).toEqual([
+        "Bearer core-shared-dormant-access",
+        "Bearer pool-shared-active-access",
+      ]);
+    } finally {
+      first.close();
+      second.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
+  });
+
+  test("re-enables dormant touch priority after the fixed suppression window", async () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
+    const first = open(path);
+    const second = open(path);
+    const base = Date.now();
+
+    try {
+      Date.now = () => base;
+      first.upsert(row("core-fixed-touch", 0, { primary: 1 }));
+      first.setPrimary("core-fixed-touch");
+      first.upsert(row("pool-fixed-touch", 1));
+      first.cacheUsage("core-fixed-touch", {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 0,
+            reset_after_seconds: 18_000,
+            limit_window_seconds: 18_000,
+          },
+        },
+      });
+      first.cacheUsage("pool-fixed-touch", {
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            reset_after_seconds: 300,
+            limit_window_seconds: 18_000,
+          },
+        },
+      });
+
+      const hits: string[] = [];
+      globalThis.fetch = (async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        if (url(input) !== CODEX_API_ENDPOINT) {
+          return new Response("ok", { status: 200 });
+        }
+        const auth = new Headers(init?.headers).get("authorization");
+        hits.push(auth ?? "");
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch;
+
+      const runA = createFetch(first, async () => auth(), stub().client);
+      const runB = createFetch(second, async () => auth(), stub().client);
+
+      await runA("https://api.openai.com/v1/responses");
+
+      Date.now = () => base + 29 * 60 * 1000;
+      expect(second.dormantTouches("core-fixed-touch")).toEqual(["rate.primary"]);
+
+      Date.now = () => base + 31 * 60 * 1000;
+      expect(second.clearExpired()).toBe(1);
+      expect(second.dormantTouches("core-fixed-touch")).toEqual([]);
+
+      const third = await runB("https://api.openai.com/v1/responses");
+
+      expect(third.status).toBe(200);
+      expect(hits).toEqual([
+        "Bearer core-fixed-touch-access",
+        "Bearer core-fixed-touch-access",
+      ]);
+    } finally {
+      Date.now = now;
+      first.close();
+      second.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
+  });
+
+  test("treats started zero-used windows as normal scoring while untouched windows get one touch", async () => {
     store.upsert(row("core-started", 0, { primary: 1 }));
     store.setPrimary("core-started");
     store.upsert(row("pool-started", 1));
@@ -3243,21 +3412,24 @@ describe("createFetch", () => {
       return new Response("ok", { status: 200 });
     }) as typeof fetch;
 
-    const { client } = stub();
+    const { client, toasts } = stub();
     const run = createFetch(store, async () => auth(), client);
 
     await run("https://api.openai.com/v1/responses");
     await Bun.sleep(0);
-    const second = await run("https://api.openai.com/v1/responses");
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const third = await run("https://api.openai.com/v1/responses");
 
-    expect(second.status).toBe(200);
+    expect(third.status).toBe(200);
     expect(hits).toEqual([
       "Bearer core-started-access",
+      "Bearer pool-started-access",
       "Bearer core-started-access",
     ]);
   });
 
-  test("stops treating untouched windows as dormant after the slack threshold", async () => {
+  test("does not treat partial countdown windows as dormant", async () => {
     store.upsert(row("core-slack", 0, { primary: 1 }));
     store.setPrimary("core-slack");
     store.upsert(row("pool-slack", 1));
@@ -3312,6 +3484,74 @@ describe("createFetch", () => {
       "Bearer core-slack-access",
       "Bearer pool-slack-access",
     ]);
+  });
+
+  test("touches dormant guard windows once before restoring normal guard pressure", async () => {
+    store.upsert(row("core-dormant-guard", 0, { primary: 1 }));
+    store.setPrimary("core-dormant-guard");
+    store.upsert(row("pool-steady", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-dormant-guard-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 0,
+                reset_after_seconds: 18_000,
+                limit_window_seconds: 18_000,
+              },
+              secondary_window: {
+                used_percent: 99,
+                reset_after_seconds: 604_700,
+                limit_window_seconds: 604_800,
+              },
+            },
+          });
+        }
+
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 10,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const third = await run("https://api.openai.com/v1/responses");
+
+    expect(third.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-dormant-guard-access",
+      "Bearer core-dormant-guard-access",
+      "Bearer pool-steady-access",
+    ]);
+    expect(
+      toasts.some((item) => item.message.includes("Because: touch dormant rate.primary")),
+    ).toBeTrue();
   });
 
   test("lets the longest rate window drive ranking even when the short window is healthy", async () => {
@@ -3865,7 +4105,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-          "Accounts:\n  [unknown] pool-first-only:\n    [4.8m] 0.400\n> [unknown] pool-second-only:\n    [19.2m] 0.800",
+            "Accounts:\n  [unknown] pool-first-only:\n    [5h] 0.400\n> [unknown] pool-second-only:\n    [5h] 0.800",
           "higher score",
           "no data",
           [],

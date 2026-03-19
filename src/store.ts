@@ -106,6 +106,17 @@ function setup(db: Database) {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS dormant_touch (
+      account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+      label TEXT NOT NULL,
+      until_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, label)
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS "lock" (
       key TEXT PRIMARY KEY,
       owner TEXT NOT NULL,
@@ -120,6 +131,9 @@ function setup(db: Database) {
   db.run("CREATE INDEX IF NOT EXISTS cooldown_until_idx ON cooldown(until_at)");
   db.run(
     "CREATE INDEX IF NOT EXISTS quota_cache_updated_idx ON quota_cache(updated_at)",
+  );
+  db.run(
+    "CREATE INDEX IF NOT EXISTS dormant_touch_until_idx ON dormant_touch(until_at)",
   );
 }
 
@@ -366,6 +380,45 @@ export function open(path?: string) {
   const clearQuota = db.prepare<unknown, { account_id: string }>(
     "DELETE FROM quota_cache WHERE account_id = $account_id",
   );
+  const touch = db.prepare<
+    unknown,
+    {
+      account_id: string;
+      created_at: number;
+      label: string;
+      until_at: number;
+      updated_at: number;
+    }
+  >(`
+    INSERT INTO dormant_touch (
+      account_id,
+      label,
+      until_at,
+      created_at,
+      updated_at
+    ) VALUES (
+      $account_id,
+      $label,
+      $until_at,
+      $created_at,
+      $updated_at
+    )
+    ON CONFLICT(account_id, label) DO UPDATE SET
+      until_at = excluded.until_at,
+      updated_at = excluded.updated_at
+  `);
+  const touchRows = db.prepare<
+    { label: string },
+    { account_id: string; now: number }
+  >(
+    "SELECT label FROM dormant_touch WHERE account_id = $account_id AND until_at > $now",
+  );
+  const clearTouch = db.prepare<unknown, { account_id: string; label: string }>(
+    "DELETE FROM dormant_touch WHERE account_id = $account_id AND label = $label",
+  );
+  const clearExpiredTouches = db.prepare<unknown, { now: number }>(
+    "DELETE FROM dormant_touch WHERE until_at <= $now",
+  );
   const plan = db.prepare<
     unknown,
     { id: string; now: number; plan_type: string }
@@ -488,7 +541,8 @@ export function open(path?: string) {
     },
 
     clearExpired() {
-      return sweep.run({ now: Date.now() }).changes;
+      const now = Date.now();
+      return sweep.run({ now }).changes + clearExpiredTouches.run({ now }).changes;
     },
 
     usage(id: string, maxAgeMs: number) {
@@ -513,6 +567,25 @@ export function open(path?: string) {
 
     clearUsage(id: string) {
       return clearQuota.run({ account_id: id }).changes > 0;
+    },
+
+    touchDormant(id: string, label: string, untilAt: number) {
+      const now = Date.now();
+      return touch.run({
+        account_id: id,
+        label,
+        until_at: untilAt,
+        created_at: now,
+        updated_at: now,
+      }).changes > 0;
+    },
+
+    dormantTouches(id: string) {
+      return touchRows.all({ account_id: id, now: Date.now() }).map((item) => item.label);
+    },
+
+    clearDormantTouch(id: string, label: string) {
+      return clearTouch.run({ account_id: id, label }).changes > 0;
     },
 
     updatePlanType(id: string, planType: string) {

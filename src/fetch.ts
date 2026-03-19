@@ -28,8 +28,8 @@ const USAGE_FETCH_WAIT_MS = 5 * 1000;
 const USAGE_ACTIVE_MS = 5 * 60 * 1000;
 const SWITCH_MARGIN = 0.35;
 const AFFINITY_MS = 300_000;
+const DORMANT_TOUCH_MS = 30 * 60 * 1000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
-const DORMANT_SLACK = 60;
 const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
 
 interface Affinity {
@@ -69,6 +69,7 @@ interface ScoreView {
   role: "core" | "pool";
   score?: number;
   source: ScoreSource;
+  touches: string[];
   deciding?: string;
   windows: ScoreWindow[];
   main?: ScoreWindow;
@@ -187,6 +188,10 @@ interface FastProfile {
 interface JsonBody {
   body: Record<string, unknown>;
   tier: boolean;
+}
+
+interface TouchWindow {
+  label: string;
 }
 
 interface UsagePoller {
@@ -355,9 +360,14 @@ function usageView(store: Store, row: Row, warm = false): UsageView {
   };
 }
 
-function quota(store: Store, row: Row, warm = false): ScoreView {
+function quota(
+  store: Store,
+  row: Row,
+  warm = false,
+): ScoreView {
   const usage = usageView(store, row, warm);
   const hit = usage.body ? score(usage.body, cacheAge(usage.at)) : null;
+  const touched = new Set(store.dormantTouches(row.id));
 
   return {
     id: row.id,
@@ -366,6 +376,7 @@ function quota(store: Store, row: Row, warm = false): ScoreView {
     role: role(row),
     score: hit?.score ?? undefined,
     source: usage.source,
+    touches: pendingTouches(touched, usage.body).map((item) => item.label),
     deciding: hit?.label,
     windows: hit?.windows ?? [],
     main: hit?.main,
@@ -416,6 +427,12 @@ function line(
   const prefix = `${head} ${tier} ${title(item)}:`;
   if (item.windows.length === 0) return `${prefix} ${text(item, scoreWidth)}`;
   return `${prefix}\n    ${text(item, scoreWidth)}`;
+}
+
+function touchReason(touches: string[]) {
+  if (touches.length === 0) return "untouched dormant window";
+  if (touches.length === 1) return `touch dormant ${touches[0]}`;
+  return `touch dormant windows (${touches.join(", ")})`;
 }
 
 function describe(scores: ScoreView[], reason: string, pick: string) {
@@ -671,7 +688,7 @@ function dormant(win: Window, used: number) {
   const span = win.limit_window_seconds;
   if (typeof span !== "number" || !Number.isFinite(span) || span <= 0) return false;
 
-  return Math.abs(span - after) <= DORMANT_SLACK;
+  return span === after;
 }
 
 function windowScore(win: Window | undefined, plan: number) {
@@ -689,8 +706,6 @@ function windowScore(win: Window | undefined, plan: number) {
     const cap = Math.sqrt(span / CAPACITY_REF);
     const time = clamp(secs / span, 0, 1);
     const factor = boost(left, time);
-    if (dormant(win, used)) return plan * left * cap * factor;
-
     const pace = Math.max(time, 0.000001);
     const cons = conservation(secs);
     return ((plan * left * cap) / (pace * cons)) * factor;
@@ -738,6 +753,35 @@ function aged(win: ReadyWindow, age = 0): ReadyWindow {
     ...win,
     reset_after_seconds: Math.max(0, win.reset_after_seconds - age),
   } satisfies ReadyWindow;
+}
+
+function dormantWindow(label: string, win: Window | undefined): TouchWindow | null {
+  const ready = readyWindow(win);
+  if (!ready) return null;
+
+  const used = clamp(ready.used_percent, 0, 100);
+  if (!dormant(ready, used)) return null;
+  return {
+    label,
+  } satisfies TouchWindow;
+}
+
+function dormantUsage(usage?: Usage) {
+  if (!usage) return [];
+  return [
+    dormantWindow("rate.primary", usage.rate_limit?.primary_window),
+    dormantWindow("rate.secondary", usage.rate_limit?.secondary_window),
+  ].filter((item): item is TouchWindow => item !== null);
+}
+
+function pendingTouches(touches: Set<string>, usage?: Usage) {
+  return dormantUsage(usage).filter((item) => !touches.has(item.label));
+}
+
+function rememberTouches(store: Store, id: string, usage?: Usage) {
+  for (const item of dormantUsage(usage)) {
+    store.touchDormant(id, item.label, Date.now() + DORMANT_TOUCH_MS);
+  }
 }
 
 function normalized(win: ReadyWindow, plan: number, age = 0) {
@@ -1432,6 +1476,19 @@ function rank(
     };
   }
 
+  const preferred = list.filter((item) => item.touches.length > 0);
+  if (preferred.length > 0) {
+    const scores = new Map(preferred.map((item) => [item.id, item.score ?? 0]));
+    const picked = rows.filter((row) => preferred.some((item) => item.id === row.id));
+    const top = order(picked, scores)[0];
+    const detail = preferred.find((item) => item.id === top?.id);
+    return {
+      rows: order(picked, scores),
+      scores: list,
+      reason: touchReason(detail?.touches ?? []),
+    };
+  }
+
   const scores = new Map(list.map((item) => [item.id, item.score ?? 0]));
   const ordered = order(rows, scores);
   const top = ordered[0];
@@ -1630,13 +1687,14 @@ export function createFetch(
 
         const state = usageSource(store, row);
         if (state === "stale") void loadUsage(store, row);
+        let usage = cachedUsage(store, row);
         const current = quota(store, row);
         const sticky = active(affinity);
         let used = attempt(
           input,
           snap,
           parsed,
-          cachedUsage(store, row),
+          usage,
           sticky && affinity.id === row.id ? affinity.fast : undefined,
         );
         if (!sticky || affinity.id !== row.id) {
@@ -1658,12 +1716,12 @@ export function createFetch(
 
         if (res.status === 401) {
           row = await renew(store, row, client);
-          const fresh = quota(store, row);
+          usage = cachedUsage(store, row);
           used = attempt(
             input,
             snap,
             parsed,
-            cachedUsage(store, row),
+            usage,
             sticky && affinity.id === row.id ? affinity.fast : undefined,
           );
           res = await send(input, used.init, row);
@@ -1693,6 +1751,7 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
+          rememberTouches(store, row.id, usage.body);
           if (session) {
             affinity.id = row.id;
             affinity.at = Date.now();

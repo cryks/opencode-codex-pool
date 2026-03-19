@@ -219,4 +219,28 @@ describe("store", () => {
       rmSync(`${path}-wal`, { force: true });
     }
   });
+
+  test("shares dormant touch state across store instances and expires it", async () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
+    const a = open(path);
+    const b = open(path);
+
+    try {
+      a.upsert(row("shared", 0));
+      a.touchDormant("shared", "rate.primary", Date.now() + 20);
+
+      expect(b.dormantTouches("shared")).toEqual(["rate.primary"]);
+
+      await Bun.sleep(25);
+
+      expect(a.clearExpired()).toBe(1);
+      expect(b.dormantTouches("shared")).toEqual([]);
+    } finally {
+      a.close();
+      b.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
+  });
 });
