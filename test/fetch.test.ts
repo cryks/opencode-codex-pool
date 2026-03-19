@@ -4179,7 +4179,7 @@ describe("createFetch", () => {
     store.upsert(row("pool-am", 1));
 
     store.cacheUsage("core-am", scored(0.1));
-    store.cacheUsage("pool-am", scored(0.12));
+    store.cacheUsage("pool-am", scored(0.132));
 
     const hits: string[] = [];
     globalThis.fetch = (async (
@@ -4195,13 +4195,13 @@ describe("createFetch", () => {
     const run = createFetch(store, async () => auth(), client);
     const body = JSON.stringify({ prompt_cache_key: "ses-am" });
 
-    // pool wins first (0.12 > 0.10), affinity = pool
+    // pool wins first (0.132 > 0.10), affinity = pool
     await run("https://api.openai.com/v1/responses", { body });
 
-    // flip: core 0.12, pool 0.10
-    // fixed 0.2 margin: 0.12 > 0.10 * 1.2 = 0.12 → false (not strict >)
-    // adaptive margin: balance = 0.833, margin ≈ 0.183 → 0.12 > 0.1183 → true
-    store.cacheUsage("core-am", scored(0.12));
+    // flip: core 0.132, pool 0.10
+    // fixed 0.35 margin: 0.132 > 0.10 * 1.35 = 0.135 → false
+    // adaptive margin: balance = 0.758, margin ≈ 0.308 → 0.132 > 0.1308 → true
+    store.cacheUsage("core-am", scored(0.132));
     store.cacheUsage("pool-am", scored(0.1));
 
     await run("https://api.openai.com/v1/responses", { body });

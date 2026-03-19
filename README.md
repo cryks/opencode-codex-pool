@@ -115,6 +115,7 @@ To reduce that, the plugin keeps short-lived per-session affinity:
 
 - If a session already succeeded on one account, the plugin prefers to stay there briefly
 - It only switches when another account is materially better, blocked, or unavailable
+- The switch threshold is adaptive: with `SWITCH_MARGIN = 0.35`, a competing account usually needs about `17.5%` to `35%` more score to break affinity
 
 This gives you better cache reuse without ignoring quota health.
 
