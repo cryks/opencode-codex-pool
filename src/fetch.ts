@@ -462,7 +462,8 @@ function describe(scores: ScoreView[], reason: string, pick: string) {
 }
 
 function signed(value: number) {
-  return `${value >= 0 ? "+" : ""}${value.toFixed(3)}`;
+  const num = Number(value.toFixed(3)) * 100;
+  return `${num >= 0 ? "+" : ""}${num.toFixed(3)}`;
 }
 
 function fastMargin(score: number, gate?: number) {
@@ -471,7 +472,7 @@ function fastMargin(score: number, gate?: number) {
 
 function gateTerm(gate?: number) {
   if (typeof gate !== "number") return "";
-  return ` - gate ${Math.abs(gate).toFixed(3)}`;
+  return ` - gate ${(Math.abs(gate) * 100).toFixed(3)}`;
 }
 
 function fastWrap(state: "enabled" | "disabled", score: string, detail?: string) {
@@ -557,7 +558,7 @@ function fastOff(info: FastView) {
       return fastWrap(
         "disabled",
         delta,
-        `${signed(info.main.score)} - guard ${info.cost.toFixed(3)}${gate}`,
+        `${signed(info.main.score)} - guard ${(Number(info.cost.toFixed(3)) * 100).toFixed(3)}${gate}`,
       );
     }
     const gate = gateTerm(info.gate);
@@ -578,10 +579,10 @@ function fastNote(info: FastView) {
   ) {
     const gate = gateTerm(info.gate);
     return fastWrap(
-      "enabled",
-      delta,
-      `${signed(info.main.score)} - guard ${info.cost.toFixed(3)}${gate}`,
-    );
+        "enabled",
+        delta,
+        `${signed(info.main.score)} - guard ${(Number(info.cost.toFixed(3)) * 100).toFixed(3)}${gate}`,
+      );
   }
   const gate = gateTerm(info.gate);
   return fastWrap("enabled", delta, `${signed(info.score)}${gate}`);

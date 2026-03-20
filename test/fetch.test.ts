@@ -50,10 +50,10 @@ function fastToast(
   gate = 0.05,
 ) {
   const signed = (value: string | number) => {
-    const num = Number(value);
+    const num = Number(value) * 100;
     return `${num >= 0 ? "+" : ""}${num.toFixed(3)}`;
   };
-  const gateTerm = (value: number) => ` - gate ${Math.abs(value).toFixed(3)}`;
+  const gateTerm = (value: number) => ` - gate ${(Math.abs(value) * 100).toFixed(3)}`;
   const wrap = (state: "enabled" | "disabled", score: string, detail?: string) =>
     detail ? `Fast: ${state} ${score}\n      (${detail})` : `Fast: ${state} ${score}`;
   const last = (line?: string) => /([+-]?\d+\.\d+)$/.exec(line ?? "")?.[1];
@@ -68,7 +68,7 @@ function fastToast(
         return wrap(
           "enabled",
           signed(Number(final) - gate),
-          `${main[2]} - guard ${Number(guard).toFixed(3)}${gateTerm(gate)}`,
+          `${signed(main[2])} - guard ${(Number(guard) * 100).toFixed(3)}${gateTerm(gate)}`,
         );
       }
       if (final) return wrap("enabled", signed(Number(final) - gate), `${signed(final)}${gateTerm(gate)}`);
@@ -86,7 +86,7 @@ function fastToast(
         return wrap(
           "disabled",
           signed(Number(final) - gate),
-          `${main[2]} - guard ${Number(guard).toFixed(3)}${gateTerm(gate)}`,
+          `${signed(main[2])} - guard ${(Number(guard) * 100).toFixed(3)}${gateTerm(gate)}`,
         );
       }
       return wrap("disabled", signed(Number(final) - gate), `${signed(final)}${gateTerm(gate)}`);
@@ -1474,7 +1474,7 @@ describe("createFetch", () => {
       input: "hi",
       service_tier: "priority",
     });
-    expect(toasts[0]?.message).toContain("Fast: enabled +0.017\n      (+0.806 - guard 0.739 - gate 0.050)");
+    expect(toasts[0]?.message).toContain("Fast: enabled +1.700\n      (+80.600 - guard 73.900 - gate 5.000)");
   });
 
   test("shows fast-mode enabled in the account switch toast", async () => {
@@ -1572,8 +1572,8 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled +0.756\n      (+0.806 - gate 0.050)");
-    expect(message.endsWith("Fast: enabled +0.756\n      (+0.806 - gate 0.050)")).toBe(true);
+    expect(message).toContain("Fast: enabled +75.600\n      (+80.600 - gate 5.000)");
+    expect(message.endsWith("Fast: enabled +75.600\n      (+80.600 - gate 5.000)")).toBe(true);
   });
 
   test("attributes multi-account fast-mode details to the selected account", async () => {
@@ -1685,7 +1685,7 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled +0.756\n      (+0.806 - gate 0.050)");
+    expect(message).toContain("Fast: enabled +75.600\n      (+80.600 - gate 5.000)");
     expect(message).not.toContain("additional 1");
     expect(body(hits[0])).toEqual({
       model: "gpt-5",
@@ -2417,7 +2417,7 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[toasts.length - 1]?.message ?? "";
-    expect(message).toContain("Fast: enabled +0.756\n      (+0.806 - gate 0.050)");
+    expect(message).toContain("Fast: enabled +75.600\n      (+80.600 - gate 5.000)");
     expect(message).not.toContain("additional 1 primary");
   });
 
@@ -2472,9 +2472,9 @@ describe("createFetch", () => {
       service_tier: "priority",
     });
     const message = toasts[0]?.message ?? "";
-    expect(message).toContain("Fast: enabled +0.756\n      (+0.806 - gate 0.050)");
+    expect(message).toContain("Fast: enabled +75.600\n      (+80.600 - gate 5.000)");
     expect(message).not.toContain("additional 1 primary");
-    expect(message.endsWith("Fast: enabled +0.756\n      (+0.806 - gate 0.050)")).toBe(true);
+    expect(message.endsWith("Fast: enabled +75.600\n      (+80.600 - gate 5.000)")).toBe(true);
   });
 
   test("ignores incomplete additional rate limits when rate_limit is complete", async () => {
