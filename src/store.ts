@@ -416,6 +416,9 @@ export function open(path?: string) {
   const clearTouch = db.prepare<unknown, { account_id: string; label: string }>(
     "DELETE FROM dormant_touch WHERE account_id = $account_id AND label = $label",
   );
+  const clearExpiredTouchRows = db.prepare<unknown, { account_id: string; now: number }>(
+    "DELETE FROM dormant_touch WHERE account_id = $account_id AND until_at <= $now",
+  );
   const clearExpiredTouches = db.prepare<unknown, { now: number }>(
     "DELETE FROM dormant_touch WHERE until_at <= $now",
   );
@@ -581,7 +584,9 @@ export function open(path?: string) {
     },
 
     dormantTouches(id: string) {
-      return touchRows.all({ account_id: id, now: Date.now() }).map((item) => item.label);
+      const now = Date.now();
+      clearExpiredTouchRows.run({ account_id: id, now });
+      return touchRows.all({ account_id: id, now }).map((item) => item.label);
     },
 
     clearDormantTouch(id: string, label: string) {

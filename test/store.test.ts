@@ -243,4 +243,28 @@ describe("store", () => {
       rmSync(`${path}-wal`, { force: true });
     }
   });
+
+  test("dormantTouches removes expired touch rows before returning", async () => {
+    const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
+    const a = open(path);
+    const b = open(path);
+
+    try {
+      a.upsert(row("shared", 0));
+      a.touchDormant("shared", "rate.primary", Date.now() + 20);
+
+      expect(b.dormantTouches("shared")).toEqual(["rate.primary"]);
+
+      await Bun.sleep(25);
+
+      expect(b.dormantTouches("shared")).toEqual([]);
+      expect(a.clearExpired()).toBe(0);
+    } finally {
+      a.close();
+      b.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
+  });
 });
