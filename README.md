@@ -133,6 +133,7 @@ This gives you better cache reuse without ignoring quota health.
 - SQLite also stores dormant-window touch suppression shared across processes
 - WAL mode is enabled so multiple opencode processes can share the same state
 - Quota data is cached and reused across processes
+- Usage fetches send `ChatGPT-Account-Id` only when the account row knows that ID; otherwise the plugin still calls the usage endpoint without that header so quota warming and background polling keep working, and any returned `account_id` is persisted back into SQLite for later requests
 - When cached quota data is reused, guard calculations age the cached window by the cache elapsed time before applying guard pressure
 
 In short: one shared local database coordinates the whole pool.

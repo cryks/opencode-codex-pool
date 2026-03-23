@@ -428,6 +428,12 @@ export function open(path?: string) {
   >(
     "UPDATE account SET plan_type = $plan_type, updated_at = $now WHERE id = $id",
   );
+  const chat = db.prepare<
+    unknown,
+    { chatgpt_account_id: string; id: string; now: number }
+  >(
+    "UPDATE account SET chatgpt_account_id = $chatgpt_account_id, updated_at = $now WHERE id = $id",
+  );
 
   const upsert = db.transaction((account: Account) => {
     const row = old.get({ id: account.id });
@@ -595,6 +601,14 @@ export function open(path?: string) {
 
     updatePlanType(id: string, planType: string) {
       return plan.run({ id, now: Date.now(), plan_type: planType }).changes > 0;
+    },
+
+    updateChatGPTAccountId(id: string, accountId: string) {
+      return chat.run({
+        chatgpt_account_id: accountId,
+        id,
+        now: Date.now(),
+      }).changes > 0;
     },
 
     available() {

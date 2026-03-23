@@ -1229,9 +1229,6 @@ async function waitUsage(store: Store, row: Row, maxAgeMs: number) {
 }
 
 async function loadUsage(store: Store, row: Row, maxAgeMs = QUOTA_CACHE_MS) {
-  const account = row.chatgpt_account_id;
-  if (!account) return null;
-
   const cached = cachedInfo(store, row, maxAgeMs);
   if (cached !== undefined) return cached.body;
 
@@ -1260,12 +1257,17 @@ async function loadUsage(store: Store, row: Row, maxAgeMs = QUOTA_CACHE_MS) {
       const headers = new Headers();
       headers.set("authorization", `Bearer ${row.access_token}`);
       headers.set("accept", "application/json");
-      headers.set("ChatGPT-Account-Id", account);
+      if (row.chatgpt_account_id) {
+        headers.set("ChatGPT-Account-Id", row.chatgpt_account_id);
+      }
 
       const res = await fetch(CODEX_USAGE_ENDPOINT, { headers });
       if (!res.ok) return null;
       const usage = ((await res.json()) as Usage) ?? {};
       store.cacheUsage(row.id, usage);
+      if (usage.account_id && usage.account_id !== row.chatgpt_account_id) {
+        store.updateChatGPTAccountId(row.id, usage.account_id);
+      }
       if (usage.plan_type) store.updatePlanType(row.id, usage.plan_type);
       return usage;
     } catch {
@@ -1365,7 +1367,7 @@ function createUsagePoller(
         const rows = await Promise.all(
           store
             .available()
-            .filter((row) => seen.has(row.id) && row.chatgpt_account_id)
+            .filter((row) => seen.has(row.id))
             .map((row) => ready(store, row, client)),
         );
 
@@ -1396,7 +1398,6 @@ function createUsagePoller(
 
       const now = Date.now();
       for (const row of rows) {
-        if (!row.chatgpt_account_id) continue;
         seen.set(row.id, now);
       }
 

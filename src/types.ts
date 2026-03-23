@@ -57,6 +57,7 @@ export interface AdditionalLimit {
 }
 
 export interface Usage {
+  account_id?: string;
   plan_type?: string;
   rate_limit?: Limit;
   additional_rate_limits?: AdditionalLimit[];

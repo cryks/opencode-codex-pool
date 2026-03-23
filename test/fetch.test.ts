@@ -503,6 +503,127 @@ describe("createFetch", () => {
     ]);
   });
 
+  test("loads usage without ChatGPT-Account-Id when the stored account ID is missing", async () => {
+    store.upsert(row("core-no-account", 0, { chatgpt_account_id: null }));
+
+    const hits: Array<{ target: string; auth: string | null; account: string | null }> = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const headers = new Headers(init?.headers);
+      const target = url(input);
+      hits.push({
+        target,
+        auth: headers.get("authorization"),
+        account: headers.get("ChatGPT-Account-Id"),
+      });
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 20,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "hi" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(hits).toEqual([
+      {
+        target: CODEX_USAGE_ENDPOINT,
+        auth: "Bearer core-no-account-access",
+        account: null,
+      },
+      {
+        target: CODEX_API_ENDPOINT,
+        auth: "Bearer core-no-account-access",
+        account: null,
+      },
+    ]);
+  });
+
+  test("backfills stored ChatGPT account IDs from usage responses", async () => {
+    store.upsert(row("core-backfill", 0, { chatgpt_account_id: null }));
+
+    const hits: Array<{ target: string; account: string | null }> = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const headers = new Headers(init?.headers);
+      const target = url(input);
+      hits.push({
+        target,
+        account: headers.get("ChatGPT-Account-Id"),
+      });
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          account_id: "backfilled-chat",
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: {
+              used_percent: 20,
+              reset_after_seconds: 600,
+              limit_window_seconds: 18_000,
+            },
+          },
+        });
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const first = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "hi" }),
+    });
+
+    expect(first.status).toBe(200);
+    expect(store.get("core-backfill")?.chatgpt_account_id).toBe("backfilled-chat");
+    expect(hits).toEqual([
+      {
+        target: CODEX_USAGE_ENDPOINT,
+        account: null,
+      },
+      {
+        target: CODEX_API_ENDPOINT,
+        account: null,
+      },
+    ]);
+
+    hits.length = 0;
+
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      {
+        target: CODEX_API_ENDPOINT,
+        account: "backfilled-chat",
+      },
+    ]);
+  });
+
   test("fetches fresh usage for expired cache entries before ranking and showing the selection toast", async () => {
     store.upsert(row("core-expired", 0, { primary: 1 }));
     store.setPrimary("core-expired");
@@ -3862,6 +3983,47 @@ describe("createFetch", () => {
       right.close();
       rmSync(path, { force: true });
     }
+  });
+
+  test("background polling revalidates accounts without stored ChatGPT account IDs", async () => {
+    const base = Date.now();
+    store.upsert(row("poll-no-account", 0, { chatgpt_account_id: null }));
+    store.cacheUsage("poll-no-account", scored(0.5), base);
+
+    const scans: Array<{ auth: string | null; account: string | null }> = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        const headers = new Headers(init?.headers);
+        scans.push({
+          auth: headers.get("authorization"),
+          account: headers.get("ChatGPT-Account-Id"),
+        });
+        return usage(20, 600);
+      }
+
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    Date.now = () => base;
+    const first = await run("https://api.openai.com/v1/responses");
+    expect(first.status).toBe(200);
+    expect(scans).toEqual([]);
+
+    Date.now = () => base + 180_001;
+    await flushUsagePollers();
+
+    expect(scans).toEqual([
+      {
+        auth: "Bearer poll-no-account-access",
+        account: null,
+      },
+    ]);
   });
 
   test("store.close disposes the shared usage poller", async () => {
