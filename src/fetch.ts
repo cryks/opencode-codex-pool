@@ -1,6 +1,7 @@
 import type { Auth } from "@opencode-ai/sdk";
 import type { PluginInput } from "@opencode-ai/plugin";
 
+import { DEFAULT_CONFIG, type FastMode, type PoolConfig } from "./config";
 import { refresh } from "./oauth";
 import type { Store } from "./store";
 import {
@@ -538,6 +539,7 @@ function fastLimitTarget(label: string) {
 }
 
 function fastOff(info: FastView) {
+  if (info.rule === "config") return "Fast: disabled (config)";
   if (info.rule === "manual") return "Fast: disabled (manual tier)";
   if (info.rule === "blocked") return "Fast: disabled (blocked)";
   if (info.rule === "no data") return "Fast: disabled (no data)";
@@ -569,6 +571,7 @@ function fastOff(info: FastView) {
 
 function fastNote(info: FastView) {
   if (!info.fast) return fastOff(info);
+  if (info.rule === "always") return "Fast: enabled (config)";
   if (typeof info.score !== "number") return "Fast: enabled";
   const delta = signed(fastMargin(info.score, info.gate));
   if (
@@ -992,6 +995,7 @@ function explainFast(
   input: RequestInfo | URL,
   parsed: JsonBody | undefined,
   usage: Usage | null,
+  mode: FastMode,
   previous?: boolean,
   age = 0,
 ): FastView {
@@ -1019,6 +1023,23 @@ function explainFast(
       fast: false,
       rule: "manual",
       target: "caller tier",
+      windows: [],
+    };
+  }
+
+  if (mode === "disabled") {
+    return {
+      fast: false,
+      rule: "config",
+      target: "config",
+      windows: [],
+    };
+  }
+
+  if (mode === "always") {
+    return {
+      fast: true,
+      rule: "always",
       windows: [],
     };
   }
@@ -1053,8 +1074,8 @@ function parseBody(body: ArrayBuffer | null) {
   }
 }
 
-function withPriority(parsed: JsonBody | undefined) {
-  if (!parsed || parsed.tier) return undefined;
+function withPriority(parsed: JsonBody | undefined, mode: FastMode) {
+  if (!parsed || parsed.tier || mode === "disabled") return undefined;
   return {
     ...parsed.body,
     service_tier: "priority",
@@ -1287,17 +1308,21 @@ function attempt(
   init: RequestInit | undefined,
   parsed: JsonBody | undefined,
   usage: UsageView,
+  mode: FastMode,
   previous?: boolean,
 ) : AttemptResult {
   const body = usage.body ?? null;
-  const info = explainFast(input, parsed, body, previous, cacheAge(usage.at));
+  const info = explainFast(input, parsed, body, mode, previous, cacheAge(usage.at));
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
     return { init, fast: false, note: fastNote(info) };
   }
-  const next = withPriority(parsed);
+  const next = withPriority(parsed, mode);
   if (!next) return { init, fast: false, note: fastNote(info) };
-  if (!body || !info.fast) {
+  if (!info.fast) {
+    return { init, fast: false, note: fastNote(info) };
+  }
+  if (info.rule !== "always" && !body) {
     return { init, fast: false, note: fastNote(info) };
   }
   return {
@@ -1622,6 +1647,7 @@ export function createFetch(
   store: Store,
   getAuth: () => Promise<Auth>,
   client: Client,
+  config: PoolConfig = DEFAULT_CONFIG,
 ) {
   const sessions = new Map<string, Affinity>();
   const poller = useUsagePoller(store, client);
@@ -1634,7 +1660,7 @@ export function createFetch(
     body = await snapshot(input, init);
     const snap = body ? { ...init, body } : init;
     const parsed = parseBody(body);
-    const candidate = withPriority(parsed);
+    const candidate = withPriority(parsed, config.fastMode);
 
     const session = cacheKey(body);
     let affinity: Affinity = { at: 0 };
@@ -1666,7 +1692,12 @@ export function createFetch(
         ? ordered
         : [pick(store)].filter((row) => row !== undefined);
 
-    if (candidate && list.length === 1) {
+    if (
+      config.fastMode === "auto" &&
+      candidate &&
+      rewrite(input).toString() === CODEX_API_ENDPOINT &&
+      list.length === 1
+    ) {
       const state = usageSource(store, list[0]);
       if (state === "missing" && !prefetched) {
         await loadUsage(store, list[0]);
@@ -1697,6 +1728,7 @@ export function createFetch(
           snap,
           parsed,
           usage,
+          config.fastMode,
           sticky && affinity.id === row.id ? affinity.fast : undefined,
         );
         if (!sticky || affinity.id !== row.id) {
@@ -1724,6 +1756,7 @@ export function createFetch(
             snap,
             parsed,
             usage,
+            config.fastMode,
             sticky && affinity.id === row.id ? affinity.fast : undefined,
           );
           res = await send(input, used.init, row);

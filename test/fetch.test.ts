@@ -10,6 +10,7 @@ import {
   flushUsagePollers,
   resetUsagePollers,
 } from "../src/fetch";
+import type { PoolConfig } from "../src/config";
 import { open } from "../src/store";
 import type { Store } from "../src/store";
 import {
@@ -64,6 +65,7 @@ function fastToast(
   const guard = last(rows.find((line) => line.startsWith("- guard")));
   const note = (() => {
     if (fast) {
+      if (rule === "always") return "Fast: enabled (config)";
       if (final && main && guard && Number(guard) > 0) {
         return wrap(
           "enabled",
@@ -75,6 +77,7 @@ function fastToast(
       return "Fast: enabled";
     }
 
+    if (rule === "config") return "Fast: disabled (config)";
     if (rule === "manual") return "Fast: disabled (manual tier)";
     if (rule === "blocked") return "Fast: disabled (blocked)";
     if (rule === "no data") return "Fast: disabled (no data)";
@@ -226,6 +229,10 @@ function stub() {
       },
     } as unknown as PluginInput["client"],
   };
+}
+
+function config(fastMode: PoolConfig["fastMode"]): PoolConfig {
+  return { fastMode };
 }
 
 function body(hit: Hit) {
@@ -906,6 +913,73 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(prompt).toBe(true);
+  });
+
+  test("forces fast-mode on when configured always", async () => {
+    store.upsert(row("always-fast", 0));
+
+    const { client, toasts } = stub();
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      expect(url(input)).toBe(CODEX_API_ENDPOINT);
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(store, async () => auth(), client, config("always"));
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    expect(toasts[0]?.message).toBe(
+      fastToast(
+        true,
+        "Account:\n> [unknown] always-fast: n/a",
+        "only available account",
+        "always",
+        [],
+        undefined,
+        "always-fast",
+      ),
+    );
+  });
+
+  test("keeps fast-mode off when configured disabled", async () => {
+    store.upsert(row("never-fast", 0));
+    store.cacheUsage("never-fast", scored(0.9));
+
+    const { client, toasts } = stub();
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      expect(url(input)).toBe(CODEX_API_ENDPOINT);
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(store, async () => auth(), client, config("disabled"));
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    expect(toasts[0]?.message).toContain("Fast: disabled (config)");
   });
 
   test("fails over on 429 and cools down the first account", async () => {

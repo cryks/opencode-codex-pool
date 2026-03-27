@@ -57,6 +57,28 @@ For local development, you can also point opencode at the source entry directly:
 }
 ```
 
+## Configuration
+
+On startup, the plugin ensures this config file exists:
+
+- `~/.config/opencode/codex-pool.json`
+
+Default contents:
+
+```json
+{
+  "fast-mode": "auto"
+}
+```
+
+After editing the file, restart opencode so the plugin reloads it.
+
+`fast-mode` supports these values:
+
+- `auto`: keep the existing score-based fast-mode decision
+- `always`: always add `service_tier: "priority"` when the plugin can decorate the outbound Codex request and the caller did not already set `service_tier` or `serviceTier`
+- `disabled`: never add `service_tier`; normal routing still applies
+
 ## First-time setup in opencode
 
 This plugin adds these auth actions:
@@ -105,14 +127,18 @@ The primary account is special. It is mirrored back into opencode's `openai` aut
 
 ## Fast mode
 
-When the selected account still looks healthy, the plugin can add `service_tier: "priority"` to that outbound prompt attempt.
+Fast mode is controlled by `~/.config/opencode/codex-pool.json`.
 
-- This decision is made after account selection
+With the default `"fast-mode": "auto"`, when the selected account still looks healthy, the plugin can add `service_tier: "priority"` to that outbound prompt attempt.
+
+- This decision is made after account selection when `fast-mode` is `auto`
 - It does not change account ordering
 - Caller-provided `service_tier` or `serviceTier` always wins
-- If the account looks constrained, fast mode stays off
+- If the account looks constrained, fast mode stays off in `auto`
+- `always` forces fast mode on whenever the plugin can decorate the request
+- `disabled` forces fast mode off
 
-You will see the fast-mode decision in the pre-request toast, using a compact score summary like `Fast: enabled +1.011 (+1.593 - guard 0.582)` when guard pressure applies.
+You will see the fast-mode decision in the pre-request toast, using a compact score summary like `Fast: enabled +1.011 (+1.593 - guard 0.582)` in `auto`, `Fast: enabled (config)` in `always`, or `Fast: disabled (config)` in `disabled`.
 
 ## Sticky session affinity
 
@@ -128,6 +154,7 @@ This gives you better cache reuse without ignoring quota health.
 
 ## Storage and shared state
 
+- Config path: `~/.config/opencode/codex-pool.json`
 - Database path: `~/.local/share/opencode/codex-pool.db`
 - SQLite is the runtime source of truth for accounts, cooldowns, token refresh locks, and quota cache
 - SQLite also stores dormant-window touch suppression shared across processes

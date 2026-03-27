@@ -10,6 +10,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 ### Key design decisions
 
+- JSON config lives at `~/.config/opencode/codex-pool.json`; the plugin auto-creates it with `{ "fast-mode": "auto" }` when missing, loads it during plugin initialization, and falls back to defaults with a warning toast if the file is invalid.
 - SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, shared usage cache, dormant-window touch suppression, and the cross-process locks that coordinate refresh and usage revalidation.
 - Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and are represented in auth state through the inert shadow provider.
 - Auth methods expose primary login, pool-account addition, and a minimal `Edit pool accounts` manager that lists current non-primary rows and can delete a selected pool account after confirmation.
@@ -42,6 +43,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 ### Dynamic fast-mode
 
 - Fast-mode is implemented as post-ranking request decoration inside `src/fetch.ts`; it does **not** change account ordering or sticky affinity.
+- Fast-mode policy comes from `~/.config/opencode/codex-pool.json` via `fast-mode: "auto" | "always" | "disabled"`. `auto` keeps the score-based behavior, `always` forces `service_tier: "priority"` whenever the plugin can decorate the request and the caller did not already set a tier, and `disabled` suppresses plugin-added fast-mode entirely.
 - The final outbound field is OpenAI's `service_tier`, even though upstream config and provider options may use `serviceTier`.
 - Fast-mode uses the same shared SQLite raw usage cache that ranking uses for the current attempt. Fresh usage is authoritative for 60 seconds; a 30-second background poller revalidates recently active accounts once their cache age crosses 3 minutes; stale cached usage may still drive the current foreground decision while a background refresh starts unless a considered non-dormant `rate_limit` reset deadline has already elapsed, in which case the cache must be synchronously refetched instead of reused. Only `missing` usage, or cache rejected by that elapsed-reset check, should force a synchronous warm-up before a single-account prompt attempt.
 - The trigger is score-based. For every complete considered window, compute the existing selection `windowScore`, then normalize it against a balanced same-window baseline where `remaining_capacity == remaining_time` (`left == time`). The normalized fast-mode window score is `ln(windowScore(actual) / windowScore(balanced))`, so `0` means on-pace, positive means healthier than pace, and negative means ahead of pace. Among the current scored `rate_limit` windows (`rate.primary` / `rate.secondary`), the window with the largest `span` becomes the fast-mode `main` value. If spans tie, the earlier window wins, which currently leaves `primary` as `main`. Every other scored window becomes a guardrail. `additional_rate_limits` are ignored for fast-mode. The final fast-mode score is `main_score - worst_guard_debt`, where `worst_guard_debt = max(0, -min(guard_scores))`. The current attempt enables fast-mode at `final_score >= 0.05`; a sticky session that was already fast-enabled keeps it until the score falls below `-0.02`.
@@ -74,6 +76,7 @@ Core auth.json stores `type: "oauth"` for the primary account so that `isCodex =
 
 ```
 src/
+  config.ts  — Config file bootstrap/parser for `~/.config/opencode/codex-pool.json`
   index.ts   — Plugin entry, auth hook, auth methods, loader
   store.ts   — SQLite account/cooldown/lock/shared-usage-cache CRUD (bun:sqlite, WAL)
   codex.ts   — Codex OAuth constants, PKCE, JWT parsing, token exchange
@@ -126,6 +129,7 @@ For source-based local development, pointing at `src/index.ts` still works becau
 - `CODEX_OAUTH_PORT`: 1455
 - `CODEX_API_ENDPOINT`: `https://chatgpt.com/backend-api/codex/responses`
 - `CODEX_ISSUER`: `https://auth.openai.com`
+- Config default path: `~/.config/opencode/codex-pool.json`
 - `SENTINEL_SHADOW_PROVIDER`: `openai-codex-pool-shadow` (inert auth.json record for additional accounts)
 - `OAUTH_DUMMY_KEY`: `OAUTH_DUMMY_KEY` (dummy key returned by the loader alongside the custom fetch)
 - `REFRESH_LEASE_MS`: `30_000` (SQLite refresh lock lease shared across processes)

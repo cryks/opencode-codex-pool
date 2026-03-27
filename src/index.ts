@@ -1,5 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin";
 
+import { readConfig } from "./config";
 import { extractAccountId, extractAccountMeta } from "./codex";
 import { createFetch } from "./fetch";
 import { browserFlow, headlessFlow } from "./oauth";
@@ -243,6 +244,11 @@ function device(label: string, primary: boolean) {
 }
 
 export default async function (input: PluginInput): Promise<Hooks> {
+  const cfg = await readConfig();
+  if (cfg.warning) {
+    void toast(input.client as ToastClient, cfg.warning, "warning");
+  }
+
   return {
     auth: {
       provider: "openai",
@@ -266,7 +272,7 @@ export default async function (input: PluginInput): Promise<Hooks> {
 
         return {
           apiKey: OAUTH_DUMMY_KEY,
-          fetch: createFetch(store, getAuth, input.client),
+          fetch: createFetch(store, getAuth, input.client, cfg.config),
         };
       },
       methods: [
