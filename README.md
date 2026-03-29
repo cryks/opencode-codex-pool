@@ -1,29 +1,45 @@
 # codex-pool
 
-Use multiple ChatGPT Codex OAuth accounts from one `openai` provider in opencode.
+Use multiple ChatGPT Codex OAuth accounts through a single `openai` provider in opencode.
 
-`codex-pool` keeps normal Codex behavior for your primary account, then automatically spreads requests across extra accounts based on available quota. Here, the primary Codex account means your default `openai` account in opencode. The plugin is built for people who already use opencode and want smoother throughput, fewer hard stops on `429`, and less manual account switching.
+`codex-pool` keeps your primary account in normal Codex mode, then uses extra accounts as overflow capacity when quota gets tight.
 
-## Why you would use this
+---
 
-- Keep using opencode's built-in Codex flow for your main account
-- Add extra ChatGPT accounts as overflow capacity
-- Route requests to the healthiest account automatically
-- Retry on `429` by moving to the next available account
-- Preserve short-term session affinity so prompt-cache warmth is not thrown away unnecessarily
-- Auto-refresh expired tokens and coordinate that safely across multiple opencode processes
+## Why use it?
 
-## What it feels like in practice
+If you already use opencode with Codex, this plugin helps you stay productive longer without manually swapping accounts.
 
-After setup, you keep using opencode normally.
+- keep your primary `openai` account as the normal Codex account
+- add extra ChatGPT accounts as a shared pool
+- route each request to the healthiest account instead of rotating blindly
+- fail over on `429` to the next eligible account
+- preserve short-lived session affinity to avoid unnecessary prompt-cache misses
+- refresh OAuth tokens automatically
+- share quota cache, cooldowns, and locks across multiple opencode processes
 
-- Your default `openai` account in opencode stays the primary Codex-compatible account
-- Extra accounts live in a shared SQLite store as pool accounts
-- Before each prompt attempt, the plugin picks the best currently available account
-- If one account is rate-limited, the request can fail over to another account
-- opencode shows a small toast explaining which account was chosen and why
+---
 
-You do not need to manually rotate accounts during normal use.
+## How it works
+
+`codex-pool` sits on top of opencode's built-in Codex flow.
+
+It mirrors your primary OAuth account so opencode still behaves like normal Codex, then overrides the request fetch path to choose the best account for each prompt attempt.
+
+At a high level:
+
+1. keep the primary account as the Codex-compatible `openai` account
+2. store extra accounts in a shared SQLite database
+3. score available accounts from current quota data
+4. send the request through the best candidate
+5. retry after refresh on `401`
+6. fail over to the next candidate on `429`
+
+This is quota-aware priority routing, not round-robin rotation.
+
+If you want the internal model, see [docs/architecture.md](docs/architecture.md).
+
+---
 
 ## Quick start
 
@@ -39,9 +55,7 @@ bun install
 bun run build
 ```
 
-### 3. Point opencode at the plugin
-
-Add the built plugin entry to your opencode config:
+### 3. Register the plugin in opencode
 
 ```json
 {
@@ -49,7 +63,7 @@ Add the built plugin entry to your opencode config:
 }
 ```
 
-For local development, you can also point opencode at the source entry directly:
+For local development, you can point opencode at the source entry instead:
 
 ```json
 {
@@ -57,13 +71,33 @@ For local development, you can also point opencode at the source entry directly:
 }
 ```
 
-## Configuration
+### 4. Add accounts
+
+The plugin adds these auth actions in opencode:
+
+- `Login primary Codex account (browser)`
+- `Login primary Codex account (headless)`
+- `Add pool account (browser)`
+- `Add pool account (headless)`
+- `Edit pool accounts`
+
+Recommended setup order:
+
+1. log in your main `openai` account as the primary account
+2. add one or more extra accounts as pool accounts
+3. keep using opencode normally
+
+If opencode already has a valid OAuth login for the default `openai` account, `codex-pool` bootstraps it automatically on first load.
+
+---
+
+## What gets configured
 
 On startup, the plugin ensures this config file exists:
 
-- `~/.config/opencode/codex-pool.json`
+`~/.config/opencode/codex-pool.json`
 
-Default contents:
+Default config:
 
 ```json
 {
@@ -74,147 +108,80 @@ Default contents:
 }
 ```
 
-After editing the file, restart opencode so the plugin reloads it.
+Restart opencode after editing the file.
 
-`fast-mode` supports these values:
+### Options
 
-- `auto`: keep the existing score-based fast-mode decision
-- `always`: always add `service_tier: "priority"` when the plugin can decorate the outbound Codex request and the caller did not already set `service_tier` or `serviceTier`
-- `disabled`: never add `service_tier`; normal routing still applies
+#### `fast-mode`
 
-`sticky-mode` supports these values:
+- `auto`: add `service_tier: "priority"` only when the selected account still looks healthy
+- `always`: always add `service_tier: "priority"` when the caller did not already set a tier
+- `disabled`: never add plugin-managed fast mode
 
-- `auto`: keep the existing score-aware sticky behavior
-- `always`: once a session sticks to an account, keep using it until the affinity expires or that account is no longer available
-- `disabled`: turn off session affinity and always use normal score ordering
+#### `sticky-mode`
 
-`sticky-strength` is a multiplier for how hard `auto` mode resists switching away from the sticky account:
+- `auto`: keep short-lived session affinity unless another account is materially better
+- `always`: hold the sticky account for the affinity window unless it becomes unavailable
+- `disabled`: always use fresh score ordering
 
-- `1`: current default behavior
-- `0`: no extra sticky margin; a better account can immediately take over
-- values above `1`: make sticky sessions harder to break
+#### `sticky-strength`
 
-`dormant-touch` controls the one-shot dormant-window promotion:
+- `1`: default switching resistance
+- `0`: no extra sticky margin
+- `>1`: stronger resistance to switching accounts during a sticky session
 
-- `true`: keep the existing behavior and start untouched dormant windows once
-- `false`: disable dormant-window touch priority entirely
+#### `dormant-touch`
 
-## First-time setup in opencode
+- `true`: start untouched dormant windows once before normal score ordering
+- `false`: disable that promotion path
 
-This plugin adds these auth actions:
+If the config file is invalid, the plugin falls back to defaults and shows a warning toast.
 
-- `Login primary Codex account (browser)`
-- `Login primary Codex account (headless)`
-- `Add pool account (browser)`
-- `Add pool account (headless)`
-- `Edit pool accounts`
+---
 
-Recommended order:
+## Why routing feels better
 
-1. Log in your main opencode `openai` account as the primary Codex account
-2. Add one or more extra accounts as pool accounts
-3. Start using opencode normally
+Most multi-account setups stop at simple failover or manual switching.
 
-`Edit pool accounts` lets you remove a non-primary pool account from the SQLite store.
+`codex-pool` goes further by choosing accounts based on current quota health and keeping short-lived session affinity when it helps.
 
-If you already have a valid OAuth login for the default `openai` account in opencode, `codex-pool` bootstraps that account into its database automatically the first time it starts.
+Highlights:
 
-## How routing works
+- **quota-aware routing** instead of blind rotation
+- **strict `429` failover** to the next eligible account
+- **sticky affinity** to avoid unnecessary prompt-cache misses
+- **optional fast mode** for healthy accounts
+- **shared SQLite state** across multiple opencode processes
 
-At a high level, routing is simple:
+For the internal routing model, storage layout, and retry rules, see [docs/architecture.md](docs/architecture.md).
 
-- Every available account gets a quota score
-- Higher remaining useful capacity means a better score
-- The plugin picks the best account for the next request
-- If a request gets `429`, that account cools down and the next eligible account is tried
-- If a request gets `401`, the plugin refreshes the token and retries once
+---
 
-The scoring is quota-aware, not round-robin. That means the plugin tries to spend capacity where it is most available instead of rotating blindly.
+## Development
 
-Untouched dormant windows are handled as a separate one-shot rule rather than as a score boost:
+Run the core checks from this directory:
 
-- If an account has any untouched dormant `rate_limit` window, that account is promoted ahead of normal score ordering for one successful request
-- A dormant window means `used_percent = 0` and `reset_after_seconds === limit_window_seconds`
-- After one successful request on that account, the same dormant window stops receiving priority for 30 minutes
-- That touch suppression is stored in SQLite, so other opencode processes do not keep re-prioritizing the same cached dormant window
+```bash
+bun test
+bun run typecheck
+bun run build
+```
 
-## Primary account vs pool accounts
+Tests use real SQLite databases rather than mocks.
 
-- `primary`: your default `openai` account in opencode, mirrored as the main OAuth account; this is what keeps opencode in Codex mode
-- `pool`: every additional non-primary account stored by the plugin
+---
 
-The primary account is special. It is mirrored back into opencode's `openai` auth so built-in Codex behavior stays active.
+## Limitations
 
-## Fast mode
+- if all available accounts are rate-limited, the last `429` response is returned
+- accounts are disabled only after a durable auth failure, not after transient request issues
+- failed quota fetches do not permanently poison routing
+- request bodies are snapshotted before retries so refresh and failover can safely replay them
 
-Fast mode is controlled by `~/.config/opencode/codex-pool.json`.
+---
 
-With the default `"fast-mode": "auto"`, when the selected account still looks healthy, the plugin can add `service_tier: "priority"` to that outbound prompt attempt.
+## Status
 
-- This decision is made after account selection when `fast-mode` is `auto`
-- It does not change account ordering
-- Caller-provided `service_tier` or `serviceTier` always wins
-- If the account looks constrained, fast mode stays off in `auto`
-- `always` forces fast mode on whenever the plugin can decorate the request
-- `disabled` forces fast mode off
+This project is currently marked `private` in `package.json` and is structured as an external opencode plugin.
 
-You will see the fast-mode decision in the pre-request toast, using a compact score summary like `Fast: enabled +1.011 (+1.593 - guard 0.582)` in `auto`, `Fast: enabled (config)` in `always`, or `Fast: disabled (config)` in `disabled`.
-
-## Sticky session affinity
-
-Different ChatGPT accounts do not share the same upstream prompt cache. Switching accounts too often can increase latency.
-
-To reduce that, the plugin keeps short-lived per-session affinity:
-
-- If a session already succeeded on one account, the plugin prefers to stay there briefly
-- `"sticky-mode": "always"` forces that preference to hold for the affinity lifetime unless the sticky account becomes unavailable
-- In `auto`, it only switches when another account is materially better, blocked, or unavailable
-- In `auto`, the switch threshold is adaptive and then scaled by `sticky-strength`: with `SWITCH_MARGIN = 0.35` and `sticky-strength = 1`, a competing account usually needs about `17.5%` to `35%` more score to break affinity
-
-This gives you better cache reuse without ignoring quota health.
-
-## Dormant window touch
-
-Untouched dormant windows are handled as a separate one-shot rule rather than as a score boost:
-
-- If `dormant-touch` is `true` and an account has any untouched dormant `rate_limit` window, that account is promoted ahead of normal score ordering for one successful request
-- A dormant window means `used_percent = 0` and `reset_after_seconds === limit_window_seconds`
-- After one successful request on that account, the same dormant window stops receiving priority for 30 minutes
-- If `dormant-touch` is `false`, this whole promotion path is skipped
-
-## Storage and shared state
-
-- Config path: `~/.config/opencode/codex-pool.json`
-- Database path: `~/.local/share/opencode/codex-pool.db`
-- SQLite is the runtime source of truth for accounts, cooldowns, token refresh locks, and quota cache
-- SQLite also stores dormant-window touch suppression shared across processes
-- WAL mode is enabled so multiple opencode processes can share the same state
-- Quota data is cached and reused across processes
-- Usage fetches send `ChatGPT-Account-Id` only when the account row knows that ID; otherwise the plugin still calls the usage endpoint without that header so quota warming and background polling keep working, and any returned `account_id` is persisted back into SQLite for later requests
-- When cached quota data is reused, guard calculations age the cached window by the cache elapsed time before applying guard pressure
-
-In short: one shared local database coordinates the whole pool.
-
-## What you will see in opencode
-
-Before a prompt is sent, the plugin shows a compact toast that includes:
-
-- the selected account
-- a short reason for the choice
-- quota score details
-- whether fast mode is enabled or disabled
-
-Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform. When enabled, dormant-window priority is applied before this normal score ordering and is not folded into the score itself.
-
-If stale quota cache is temporarily reused, the toast also shows the cache age. Guard-based ranking and fast-mode guard pressure both age cached windows by that elapsed cache time instead of treating the cached reset time as brand new.
-
-## Limits and behavior to know about
-
-- If all available accounts are rate-limited, the last `429` response is returned
-- Accounts are only disabled after a durable auth failure: a request still returns `401` after refresh and one retry
-- Failed usage fetches do not permanently poison routing; the plugin keeps existing state and retries later
-- Request bodies are snapshotted before retries so failover and refresh can safely replay the same payload
-
-## Architecture
-
-For implementation details and internal design notes, see `docs/architecture.md`.
+If you want to publish it as an npm package later, the current README structure should already fit that transition well.

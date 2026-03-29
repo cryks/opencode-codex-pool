@@ -1,48 +1,59 @@
 # Architecture
 
-This document covers the internal design of `codex-pool`.
+Understand how `codex-pool` preserves normal Codex behavior while adding multi-account routing.
 
-## Overview
+---
 
-`codex-pool` is an external opencode plugin that lets one `openai` provider use multiple ChatGPT Codex OAuth accounts.
+## Start with the goal
 
-- The default `openai` account in opencode is treated as the primary account
-- Additional accounts are stored as pool accounts
-- Request routing is quota-aware across the full fleet
-- SQLite is the shared runtime source of truth
+`codex-pool` is an external opencode plugin for people who want to use multiple ChatGPT Codex OAuth accounts through one `openai` provider.
 
-The goal is to preserve normal Codex behavior for the primary account while adding multi-account routing, token refresh coordination, sticky affinity, and `429` failover.
+The design goal is simple: keep the primary account behaving exactly like normal Codex, then add a quota-aware routing layer on top.
 
-## Integration model
+---
+
+## Understand the integration
 
 The plugin hooks `provider: "openai"` through `auth.loader`.
 
-- opencode's built-in Codex plugin runs first
-- `codex-pool` then layers in a dummy OAuth `apiKey` and a replacement `fetch`
-- the default `openai` auth remains OAuth-backed so opencode still sees Codex mode as active
+The built-in Codex plugin still runs first, then `codex-pool` layers in a dummy OAuth `apiKey` and a replacement `fetch` implementation.
 
-This keeps built-in Codex behavior such as model shaping and Codex-specific handling intact.
+This is what keeps built-in Codex behavior such as model shaping, zeroed costs, and Codex-specific request handling intact.
 
-## Account model
+---
 
-- `primary`: the default `openai` account in opencode, mirrored into the plugin store and back into opencode auth
-- `pool`: every non-primary account stored in SQLite
+## Distinguish the account roles
 
-The primary account is special because it preserves Codex-mode compatibility. Pool accounts do not replace the primary provider; they extend routing capacity.
+- **primary**: the default `openai` account in opencode
+- **pool**: every extra non-primary account stored by the plugin
 
-## Runtime source of truth
+The primary account is mirrored back into core auth so opencode still sees `auth.type = "oauth"` on the `openai` provider.
 
-SQLite at `~/.local/share/opencode/codex-pool.db` is the only runtime source of truth for:
+That is the key compatibility requirement for staying in Codex mode.
+
+---
+
+## Track where state lives
+
+The plugin uses two local files:
+
+- config: `~/.config/opencode/codex-pool.json`
+- database: `~/.local/share/opencode/codex-pool.db`
+
+SQLite is the runtime source of truth for:
 
 - account tokens and metadata
-- account priority and primary designation
-- cooldown state after rate limits
-- shared usage cache
-- refresh locks and usage-refresh locks across processes
+- primary and priority state
+- cooldowns after rate limits
+- shared quota cache
+- dormant-touch suppression
+- refresh and usage locks across processes
 
 The database runs in WAL mode so multiple opencode processes can coordinate safely.
 
-## Authentication flows
+---
+
+## Follow the auth flow
 
 The plugin exposes these auth actions:
 
@@ -52,104 +63,202 @@ The plugin exposes these auth actions:
 - `Add pool account (headless)`
 - `Edit pool accounts`
 
-If SQLite is empty but opencode already has a valid OAuth login for the default `openai` account, the plugin bootstraps that account into SQLite automatically.
+If opencode already has a valid OAuth login for the default `openai` account, `codex-pool` bootstraps that account into SQLite automatically when the plugin starts.
 
-## Routing model
+Pool accounts are stored only in SQLite and are represented in auth state through an inert shadow provider.
 
-Routing is quota-aware, not round-robin.
+---
 
-- every available account is scored
-- higher score means more useful capacity is available now
-- ties fall back to stored priority
-- requests are reordered across the entire fleet, not just at a `core` versus `pool` boundary
+## Follow the request path
 
-The scoring model considers plan weight, remaining capacity, time left in the active window, window size, recovery cost, and bounded health adjustments.
+At a high level, a prompt attempt looks like this:
 
-### Multi-window handling
+1. read the current auth and shared store state
+2. collect available accounts from SQLite
+3. warm or reuse quota data
+4. score the candidate accounts
+5. choose the best account
+6. optionally enable fast mode for that attempt
+7. send the request through the overridden fetch path
+8. refresh on `401` or fail over on `429` when needed
+
+Routing happens per attempt, not per session, although sticky affinity can bias the next selection.
+
+---
+
+## Learn the routing model
+
+Routing is quota-aware and priority-based.
+
+It is not round-robin.
+
+Each available account gets a score. Higher score means the account has more useful remaining capacity right now.
+
+The score is influenced by:
+
+- plan weight
+- remaining capacity
+- time left in the active window
+- absolute window size
+- recovery horizon
+- bounded health adjustments
+
+If scores tie, stored priority order breaks the tie.
+
+Once scores are available, requests are reordered across the full fleet rather than only at a `core` versus `pool` boundary.
+
+---
+
+## Handle multiple windows
 
 When `rate_limit` exposes multiple complete windows with a clear longest span:
 
 - the longest window becomes the main score
-- shorter windows act as guardrails
-- the final routing score is the main score reduced by the worst guard pressure
+- the shorter windows act as guardrails
+- the final routing score becomes `main_score * worst_guard_factor`
 
-If windows cannot be reduced cleanly, routing falls back to the more conservative raw-window comparison.
+This keeps a healthy long window from dominating when a shorter guard window is close to exhaustion.
+
+If the windows cannot be reduced cleanly, routing falls back to the more conservative raw-window comparison.
 
 `additional_rate_limits` and `code_review_rate_limit` are ignored for account selection.
 
-## Shared usage cache
+---
 
-Usage data comes from ChatGPT usage metadata and is cached in SQLite.
+## Reuse quota data
 
-- fresh cache is shared across opencode processes
-- stale cache may still be reused briefly while background warming runs
-- expired cache is synchronously refreshed when it can no longer represent the active quota state
+Quota signals come from `https://chatgpt.com/backend-api/wham/usage`.
+
+The plugin caches raw usage payloads in SQLite so multiple opencode processes can share warm data.
+
+Important behaviors:
+
+- fresh cache is authoritative for 60 seconds
+- active accounts are revalidated in the background every 30 seconds once cache age passes 3 minutes
+- stale cache can still be reused briefly while background warming starts
+- cache is synchronously refreshed when a considered non-dormant window can no longer describe the active state
 - per-account usage refreshes are deduplicated with SQLite locks
 
-This keeps ranking reasonably fresh without forcing a network fetch before every request.
+If a stored account row does not yet know the `ChatGPT-Account-Id`, the plugin still queries usage without that header and persists `account_id` later if the payload returns it.
 
-## Sticky affinity
+---
 
-Different ChatGPT accounts do not share the same upstream prompt cache. To avoid needless cache misses, `codex-pool` keeps short-lived per-session affinity.
+## Understand sticky affinity
 
-- a session prefers the account that most recently succeeded
-- the affinity lasts for a short window
-- the router abandons affinity when another account is materially healthier, blocked, or unavailable
+Different ChatGPT accounts do not share provider-side prompt cache state.
 
-Affinity is keyed by `prompt_cache_key` in the request body.
+To reduce unnecessary cache misses, `codex-pool` keeps short-lived per-session affinity for the account that most recently succeeded.
 
-## Fast mode
+Key behaviors:
 
-After account selection, the plugin may decorate the request with `service_tier: "priority"`.
+- affinity is keyed by `prompt_cache_key`
+- the affinity window lasts 5 minutes
+- `sticky-mode: "disabled"` turns it off
+- `sticky-mode: "always"` holds the sticky account unless it becomes unavailable
+- `sticky-mode: "auto"` breaks affinity only when another account is materially better, blocked, or the window expires
 
-- this is a post-selection decision
-- it does not affect account ordering
-- caller-supplied `service_tier` or `serviceTier` takes precedence
-- low remaining capacity, blocked limits, or incomplete data keep fast mode off
+`sticky-strength` scales how hard `auto` mode resists switching.
 
-Fast mode uses the same shared usage data as routing.
+---
 
-## Retry and failure behavior
+## Understand fast mode
 
-- on `429`, the active account is cooled down and the next eligible account is tried
-- on `401`, the plugin refreshes the token and retries once
-- an account is only disabled after a durable auth failure: it still returns `401` after refresh and retry
-- transient request, refresh, or usage-fetch failures do not disable the account
+Fast mode is a post-selection request decoration in `src/fetch.ts`.
 
-Request bodies are snapshotted before retries so one attempt's outbound fields do not leak into the next attempt.
+It never changes account ordering or sticky affinity.
 
-## Toasts and observability
+When enabled, the plugin adds OpenAI's `service_tier: "priority"` field to the outbound request unless the caller already provided `service_tier` or `serviceTier`.
 
-Immediately before an outbound prompt attempt, the plugin shows a compact selection toast with:
+Modes:
+
+- `auto`: use score-based fast-mode gating
+- `always`: force fast mode on when request decoration is possible
+- `disabled`: never add plugin-managed fast mode
+
+Fast mode uses the same usage data as routing and stays off when limits are blocked, capacity is too low, or the data is incomplete.
+
+---
+
+## Understand dormant touch
+
+Dormant windows are handled separately from the normal score.
+
+When `dormant-touch = true` and an account exposes an untouched dormant `rate_limit` window, that account is temporarily promoted ahead of normal quota ranking for one successful request.
+
+An untouched dormant window means:
+
+- `used_percent = 0`
+- `reset_after_seconds === limit_window_seconds`
+
+After the first successful touch, that window is suppressed for 30 minutes in SQLite so other opencode processes do not keep re-prioritizing it.
+
+---
+
+## Understand retries and failure rules
+
+- on `401`, the plugin refreshes the account token and retries once
+- on `429`, the account is cooled down and the next eligible account is tried
+- an account is disabled only after a durable auth failure: it still returns `401` after refresh and retry
+- transient request, refresh, and usage-fetch failures do not disable the account
+
+Request bodies are snapshotted before retries so one attempt's outbound fields do not leak into later attempts.
+
+---
+
+## Read the observability signals
+
+Immediately before an outbound prompt attempt, the plugin shows a compact toast with:
 
 - the chosen account
-- score details
 - a short reason for the choice
+- score details
 - fast-mode status
 
-If stale cache is reused, the toast includes the cache age.
+When stale quota cache is reused, the toast also includes the cache age.
 
-## Source layout
+When reduced multi-window scoring applies, the score summary is shown as:
+
+```text
+<score> (<base> * guard x<factor>)
+```
+
+---
+
+## Browse the source
 
 ```text
 src/
-  index.ts   - plugin entry, auth hook, auth methods, loader
-  fetch.ts   - quota-aware routing, failover, sticky affinity, fast mode, token refresh
-  store.ts   - SQLite CRUD for accounts, cooldowns, locks, and shared usage cache
-  oauth.ts   - browser OAuth flow, device flow, token refresh
-  sync.ts    - bootstrap existing primary auth into SQLite
-  codex.ts   - PKCE helpers, JWT parsing, token exchange
-  types.ts   - shared types and constants
+  config.ts
+  index.ts
+  store.ts
+  codex.ts
+  oauth.ts
+  sync.ts
+  fetch.ts
+  types.ts
 test/
-  fetch.test.ts - routing, failover, refresh, affinity, and cache behavior tests
-  index.test.ts - auth method and pool account editor tests
-  store.test.ts - store, cooldown, lock, and shared cache behavior tests
+  config.test.ts
+  index.test.ts
+  store.test.ts
+  fetch.test.ts
 ```
 
-## Development commands
+Main responsibilities:
+
+- `src/index.ts` — plugin entry, auth actions, loader
+- `src/fetch.ts` — routing, failover, refresh, sticky affinity, fast mode
+- `src/store.ts` — SQLite CRUD, cooldowns, locks, quota cache
+- `src/oauth.ts` — browser flow, device flow, refresh
+- `src/sync.ts` — bootstrap existing primary auth into SQLite
+
+---
+
+## Run the checks
 
 ```bash
 bun run build
 bun run typecheck
 bun test
 ```
+
+Tests use real SQLite databases rather than mocks, including multi-connection cases.
