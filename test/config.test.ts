@@ -39,6 +39,29 @@ describe("config", () => {
     expect((await readConfig(path)).config.fastMode).toBe("disabled");
   });
 
+  test("reads sticky and dormant-touch config values", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(
+      path,
+      JSON.stringify({
+        "sticky-mode": "always",
+        "sticky-strength": 2.5,
+        "dormant-touch": false,
+      }),
+    );
+
+    expect((await readConfig(path)).config).toEqual({
+      ...DEFAULT_CONFIG,
+      stickyMode: "always",
+      stickyStrength: 2.5,
+      dormantTouch: false,
+    });
+  });
+
   test("falls back to defaults when fast-mode is invalid", async () => {
     const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
     const path = join(dir, "codex-pool.json");
@@ -51,5 +74,44 @@ describe("config", () => {
     expect(state.config).toEqual(DEFAULT_CONFIG);
     expect(state.warning).toContain("Invalid config");
     expect(state.warning).toContain('"fast-mode"');
+  });
+
+  test("falls back to defaults when sticky-mode is invalid", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(path, JSON.stringify({ "sticky-mode": "nope" }));
+    const state = await readConfig(path);
+
+    expect(state.config).toEqual(DEFAULT_CONFIG);
+    expect(state.warning).toContain('"sticky-mode"');
+  });
+
+  test("falls back to defaults when sticky-strength is invalid", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(path, JSON.stringify({ "sticky-strength": -1 }));
+    const state = await readConfig(path);
+
+    expect(state.config).toEqual(DEFAULT_CONFIG);
+    expect(state.warning).toContain('"sticky-strength"');
+  });
+
+  test("falls back to defaults when dormant-touch is invalid", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(path, JSON.stringify({ "dormant-touch": "nope" }));
+    const state = await readConfig(path);
+
+    expect(state.config).toEqual(DEFAULT_CONFIG);
+    expect(state.warning).toContain('"dormant-touch"');
   });
 });

@@ -231,8 +231,14 @@ function stub() {
   };
 }
 
-function config(fastMode: PoolConfig["fastMode"]): PoolConfig {
-  return { fastMode };
+function config(over: Partial<PoolConfig> = {}): PoolConfig {
+  return {
+    fastMode: "auto",
+    stickyMode: "auto",
+    stickyStrength: 1,
+    dormantTouch: true,
+    ...over,
+  };
 }
 
 function body(hit: Hit) {
@@ -929,7 +935,7 @@ describe("createFetch", () => {
       return new Response(await new Response(init?.body).text(), { status: 200 });
     }) as typeof fetch;
 
-    const run = createFetch(store, async () => auth(), client, config("always"));
+    const run = createFetch(store, async () => auth(), client, config({ fastMode: "always" }));
     const res = await run("https://api.openai.com/v1/responses", {
       method: "POST",
       body: JSON.stringify({ model: "gpt-5", input: "hi" }),
@@ -970,7 +976,7 @@ describe("createFetch", () => {
       return new Response(await new Response(init?.body).text(), { status: 200 });
     }) as typeof fetch;
 
-    const run = createFetch(store, async () => auth(), client, config("disabled"));
+    const run = createFetch(store, async () => auth(), client, config({ fastMode: "disabled" }));
     const res = await run("https://api.openai.com/v1/responses", {
       method: "POST",
       body: JSON.stringify({ model: "gpt-5", input: "hi" }),
@@ -3432,6 +3438,62 @@ describe("createFetch", () => {
     ).toBeTrue();
   });
 
+  test("can disable dormant touch priority from config", async () => {
+    store.upsert(row("core-no-dormant-touch", 0, { primary: 1 }));
+    store.setPrimary("core-no-dormant-touch");
+    store.upsert(row("pool-no-dormant-touch", 1));
+
+    store.cacheUsage("core-no-dormant-touch", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+    store.cacheUsage("pool-no-dormant-touch", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 10,
+          reset_after_seconds: 300,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        return new Response("unexpected usage fetch", { status: 500 });
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ dormantTouch: false }),
+    );
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits).toEqual(["Bearer pool-no-dormant-touch-access"]);
+    expect(toasts[0]?.message).not.toContain("Because: touch dormant");
+  });
+
   test("persists dormant touches across fetch instances while cached usage stays dormant", async () => {
     const path = join(tmpdir(), `codex-pool-${crypto.randomUUID()}.db`);
     const first = open(path);
@@ -4270,6 +4332,126 @@ describe("createFetch", () => {
       "Bearer pool-sticky-access",
     ]);
     expect(toasts).toHaveLength(1);
+  });
+
+  test("sticky-mode always forces the session to stay on the sticky account", async () => {
+    store.upsert(row("core-sticky-force", 0, { primary: 1 }));
+    store.setPrimary("core-sticky-force");
+    store.upsert(row("pool-sticky-force", 1));
+
+    store.cacheUsage("core-sticky-force", scored(0.5));
+    store.cacheUsage("pool-sticky-force", scored(0.55));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "always" }),
+    );
+    const body = JSON.stringify({ prompt_cache_key: "ses-sticky-force" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    store.cacheUsage("core-sticky-force", scored(0.8));
+    store.cacheUsage("pool-sticky-force", scored(0.55));
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer pool-sticky-force-access",
+      "Bearer pool-sticky-force-access",
+    ]);
+  });
+
+  test("sticky-mode disabled turns off session affinity", async () => {
+    store.upsert(row("core-sticky-off", 0, { primary: 1 }));
+    store.setPrimary("core-sticky-off");
+    store.upsert(row("pool-sticky-off", 1));
+
+    store.cacheUsage("core-sticky-off", scored(0.5));
+    store.cacheUsage("pool-sticky-off", scored(0.55));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "disabled" }),
+    );
+    const body = JSON.stringify({ prompt_cache_key: "ses-sticky-off" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    store.cacheUsage("core-sticky-off", scored(0.56));
+    store.cacheUsage("pool-sticky-off", scored(0.55));
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer pool-sticky-off-access",
+      "Bearer core-sticky-off-access",
+    ]);
+  });
+
+  test("sticky-strength can reduce the switch margin", async () => {
+    store.upsert(row("core-sticky-thin", 0, { primary: 1 }));
+    store.setPrimary("core-sticky-thin");
+    store.upsert(row("pool-sticky-thin", 1));
+
+    store.cacheUsage("core-sticky-thin", scored(0.5));
+    store.cacheUsage("pool-sticky-thin", scored(0.55));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyStrength: 0 }),
+    );
+    const body = JSON.stringify({ prompt_cache_key: "ses-sticky-thin" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    store.cacheUsage("core-sticky-thin", scored(0.56));
+    store.cacheUsage("pool-sticky-thin", scored(0.55));
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer pool-sticky-thin-access",
+      "Bearer core-sticky-thin-access",
+    ]);
   });
 
   test("sticky affinity can keep a lower-priority pool account", async () => {

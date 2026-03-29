@@ -3,9 +3,13 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 export type FastMode = "auto" | "always" | "disabled";
+export type StickyMode = "auto" | "always" | "disabled";
 
 export interface PoolConfig {
   fastMode: FastMode;
+  stickyMode: StickyMode;
+  stickyStrength: number;
+  dormantTouch: boolean;
 }
 
 export interface ConfigState {
@@ -23,6 +27,9 @@ export const DEFAULT_CONFIG_PATH = join(
 
 export const DEFAULT_CONFIG: PoolConfig = {
   fastMode: "auto",
+  stickyMode: "auto",
+  stickyStrength: 1,
+  dormantTouch: true,
 };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -37,19 +44,60 @@ function parse(value: unknown): PoolConfig {
   if (!object(value)) throw new Error("Config must be a JSON object");
 
   const mode = value["fast-mode"];
-  if (mode === undefined) {
-    return { fastMode: DEFAULT_CONFIG.fastMode };
+  if (mode !== undefined) {
+    if (mode !== "auto" && mode !== "always" && mode !== "disabled") {
+      throw new Error('"fast-mode" must be "auto", "always", or "disabled"');
+    }
   }
 
-  if (mode === "auto" || mode === "always" || mode === "disabled") {
-    return { fastMode: mode };
+  const stickyMode = value["sticky-mode"];
+  if (stickyMode !== undefined) {
+    if (
+      stickyMode !== "auto" &&
+      stickyMode !== "always" &&
+      stickyMode !== "disabled"
+    ) {
+      throw new Error('"sticky-mode" must be "auto", "always", or "disabled"');
+    }
   }
 
-  throw new Error('"fast-mode" must be "auto", "always", or "disabled"');
+  const stickyStrength = value["sticky-strength"];
+  if (stickyStrength !== undefined) {
+    if (
+      typeof stickyStrength !== "number" ||
+      !Number.isFinite(stickyStrength) ||
+      stickyStrength < 0
+    ) {
+      throw new Error('"sticky-strength" must be a finite number >= 0');
+    }
+  }
+
+  const dormantTouch = value["dormant-touch"];
+  if (dormantTouch !== undefined) {
+    if (typeof dormantTouch !== "boolean") {
+      throw new Error('"dormant-touch" must be a boolean');
+    }
+  }
+
+  return {
+    fastMode: mode ?? DEFAULT_CONFIG.fastMode,
+    stickyMode: stickyMode ?? DEFAULT_CONFIG.stickyMode,
+    stickyStrength: stickyStrength ?? DEFAULT_CONFIG.stickyStrength,
+    dormantTouch: dormantTouch ?? DEFAULT_CONFIG.dormantTouch,
+  };
 }
 
 export function renderConfig(config: PoolConfig = DEFAULT_CONFIG) {
-  return `${JSON.stringify({ "fast-mode": config.fastMode }, null, 2)}\n`;
+  return `${JSON.stringify(
+    {
+      "fast-mode": config.fastMode,
+      "sticky-mode": config.stickyMode,
+      "sticky-strength": config.stickyStrength,
+      "dormant-touch": config.dormantTouch,
+    },
+    null,
+    2,
+  )}\n`;
 }
 
 export async function readConfig(path = DEFAULT_CONFIG_PATH): Promise<ConfigState> {
@@ -61,7 +109,7 @@ export async function readConfig(path = DEFAULT_CONFIG_PATH): Promise<ConfigStat
       await Bun.write(path, renderConfig());
       return {
         path,
-        config: { fastMode: DEFAULT_CONFIG.fastMode },
+        config: { ...DEFAULT_CONFIG },
       } satisfies ConfigState;
     }
 
@@ -72,7 +120,7 @@ export async function readConfig(path = DEFAULT_CONFIG_PATH): Promise<ConfigStat
   } catch (err) {
     return {
       path,
-      config: { fastMode: DEFAULT_CONFIG.fastMode },
+      config: { ...DEFAULT_CONFIG },
       warning: `Invalid config at ${path}; using defaults (${message(err)})`,
     } satisfies ConfigState;
   }

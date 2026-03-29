@@ -1,7 +1,12 @@
 import type { Auth } from "@opencode-ai/sdk";
 import type { PluginInput } from "@opencode-ai/plugin";
 
-import { DEFAULT_CONFIG, type FastMode, type PoolConfig } from "./config";
+import {
+  DEFAULT_CONFIG,
+  type FastMode,
+  type PoolConfig,
+  type StickyMode,
+} from "./config";
 import { refresh } from "./oauth";
 import type { Store } from "./store";
 import {
@@ -45,7 +50,8 @@ interface AttemptResult {
   note: string;
 }
 
-function active(affinity: Affinity) {
+function active(affinity: Affinity, mode: StickyMode) {
+  if (mode === "disabled") return false;
   return Boolean(affinity.id) && Date.now() - affinity.at < AFFINITY_MS;
 }
 
@@ -364,6 +370,7 @@ function usageView(store: Store, row: Row, warm = false): UsageView {
 function quota(
   store: Store,
   row: Row,
+  config: PoolConfig,
   warm = false,
 ): ScoreView {
   const usage = usageView(store, row, warm);
@@ -377,7 +384,9 @@ function quota(
     role: role(row),
     score: hit?.score ?? undefined,
     source: usage.source,
-    touches: pendingTouches(touched, usage.body).map((item) => item.label),
+    touches: config.dormantTouch
+      ? pendingTouches(touched, usage.body).map((item) => item.label)
+      : [],
     deciding: hit?.label,
     windows: hit?.windows ?? [],
     main: hit?.main,
@@ -782,10 +791,16 @@ function pendingTouches(touches: Set<string>, usage?: Usage) {
   return dormantUsage(usage).filter((item) => !touches.has(item.label));
 }
 
-function rememberTouches(store: Store, id: string, usage?: Usage) {
+function rememberTouches(store: Store, id: string, usage?: Usage, enabled = true) {
+  if (!enabled) return;
   for (const item of dormantUsage(usage)) {
     store.touchDormant(id, item.label, Date.now() + DORMANT_TOUCH_MS);
   }
+}
+
+function margin(base: number, best: number, strength: number) {
+  const hi = Math.max(base, best, 0.001);
+  return SWITCH_MARGIN * strength * (0.5 + 0.5 * Math.min(base, best) / hi);
 }
 
 function normalized(win: ReadyWindow, plan: number, age = 0) {
@@ -1477,12 +1492,13 @@ function rank(
   store: Store,
   rows: Row[],
   affinity: Affinity,
+  config: PoolConfig,
   warm = true,
 ): RankResult {
   if (rows.length <= 1) {
     return {
       rows,
-      scores: rows.map((row) => quota(store, row)),
+      scores: rows.map((row) => quota(store, row, config)),
       reason: rows.length === 1 ? "only available account" : undefined,
     };
   }
@@ -1490,11 +1506,11 @@ function rank(
   if (!store.primary() && rows.every((row) => row.primary !== 1)) {
     return {
       rows,
-      scores: rows.map((row) => quota(store, row)),
+      scores: rows.map((row) => quota(store, row, config)),
     };
   }
 
-  const list = rows.map((row) => quota(store, row, warm));
+  const list = rows.map((row) => quota(store, row, config, warm));
   if (list.some((item) => item.score === undefined)) {
     return {
       rows,
@@ -1527,16 +1543,17 @@ function rank(
     };
   }
 
-  if (active(affinity)) {
+  if (active(affinity, config.stickyMode)) {
     const stick = rows.find((row) => row.id === affinity.id);
     const base = stick ? scores.get(stick.id) ?? 0 : 0;
     const alt = stick ? ordered.find((row) => row.id !== stick.id) : undefined;
     const best = alt ? scores.get(alt.id) ?? 0 : 0;
 
     if (stick && alt && base > 0) {
-      const hi = Math.max(base, best, 0.001);
-      const margin = SWITCH_MARGIN * (0.5 + 0.5 * Math.min(base, best) / hi);
-      if (best > base * (1 + margin)) {
+      if (
+        config.stickyMode !== "always" &&
+        best > base * (1 + margin(base, best, config.stickyStrength))
+      ) {
         return {
           rows: ordered,
           scores: list,
@@ -1685,7 +1702,7 @@ export function createFetch(
     );
     poller.touch(rows);
     const prefetched = await fetchExpiredUsage(store, rows, client);
-    const ranked = rank(store, rows, affinity, !prefetched);
+    const ranked = rank(store, rows, affinity, config, !prefetched);
     const ordered = ranked.rows;
     const list =
       ordered.length > 0
@@ -1721,8 +1738,8 @@ export function createFetch(
         const state = usageSource(store, row);
         if (state === "stale") void loadUsage(store, row);
         let usage = cachedUsage(store, row);
-        const current = quota(store, row);
-        const sticky = active(affinity);
+        const current = quota(store, row, config);
+        const sticky = active(affinity, config.stickyMode);
         let used = attempt(
           input,
           snap,
@@ -1733,7 +1750,7 @@ export function createFetch(
         );
         if (!sticky || affinity.id !== row.id) {
           const scores = listed(
-            ranked.scores.length > 0 ? ranked.scores : [quota(store, row)],
+            ranked.scores.length > 0 ? ranked.scores : [quota(store, row, config)],
             current,
           );
           selectionToast(
@@ -1786,7 +1803,7 @@ export function createFetch(
         if (res.ok) {
           store.enable(row.id);
           store.clearCooldown(row.id);
-          rememberTouches(store, row.id, usage.body);
+          rememberTouches(store, row.id, usage.body, config.dormantTouch);
           if (session) {
             affinity.id = row.id;
             affinity.at = Date.now();

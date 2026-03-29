@@ -67,7 +67,10 @@ Default contents:
 
 ```json
 {
-  "fast-mode": "auto"
+  "fast-mode": "auto",
+  "sticky-mode": "auto",
+  "sticky-strength": 1,
+  "dormant-touch": true
 }
 ```
 
@@ -78,6 +81,23 @@ After editing the file, restart opencode so the plugin reloads it.
 - `auto`: keep the existing score-based fast-mode decision
 - `always`: always add `service_tier: "priority"` when the plugin can decorate the outbound Codex request and the caller did not already set `service_tier` or `serviceTier`
 - `disabled`: never add `service_tier`; normal routing still applies
+
+`sticky-mode` supports these values:
+
+- `auto`: keep the existing score-aware sticky behavior
+- `always`: once a session sticks to an account, keep using it until the affinity expires or that account is no longer available
+- `disabled`: turn off session affinity and always use normal score ordering
+
+`sticky-strength` is a multiplier for how hard `auto` mode resists switching away from the sticky account:
+
+- `1`: current default behavior
+- `0`: no extra sticky margin; a better account can immediately take over
+- values above `1`: make sticky sessions harder to break
+
+`dormant-touch` controls the one-shot dormant-window promotion:
+
+- `true`: keep the existing behavior and start untouched dormant windows once
+- `false`: disable dormant-window touch priority entirely
 
 ## First-time setup in opencode
 
@@ -147,10 +167,20 @@ Different ChatGPT accounts do not share the same upstream prompt cache. Switchin
 To reduce that, the plugin keeps short-lived per-session affinity:
 
 - If a session already succeeded on one account, the plugin prefers to stay there briefly
-- It only switches when another account is materially better, blocked, or unavailable
-- The switch threshold is adaptive: with `SWITCH_MARGIN = 0.35`, a competing account usually needs about `17.5%` to `35%` more score to break affinity
+- `"sticky-mode": "always"` forces that preference to hold for the affinity lifetime unless the sticky account becomes unavailable
+- In `auto`, it only switches when another account is materially better, blocked, or unavailable
+- In `auto`, the switch threshold is adaptive and then scaled by `sticky-strength`: with `SWITCH_MARGIN = 0.35` and `sticky-strength = 1`, a competing account usually needs about `17.5%` to `35%` more score to break affinity
 
 This gives you better cache reuse without ignoring quota health.
+
+## Dormant window touch
+
+Untouched dormant windows are handled as a separate one-shot rule rather than as a score boost:
+
+- If `dormant-touch` is `true` and an account has any untouched dormant `rate_limit` window, that account is promoted ahead of normal score ordering for one successful request
+- A dormant window means `used_percent = 0` and `reset_after_seconds === limit_window_seconds`
+- After one successful request on that account, the same dormant window stops receiving priority for 30 minutes
+- If `dormant-touch` is `false`, this whole promotion path is skipped
 
 ## Storage and shared state
 
@@ -174,7 +204,7 @@ Before a prompt is sent, the plugin shows a compact toast that includes:
 - quota score details
 - whether fast mode is enabled or disabled
 
-Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform. Dormant-window priority is applied before this normal score ordering and is not folded into the score itself.
+Reduced multi-window account scores are shown as `<score> (<base> * guard x<factor>)`. The guard factor is the guard window's current score ratio against its balanced same-window baseline (`exp(ln(raw / balanced))`, capped at `1`), so ahead-of-pace short windows suppress selection more aggressively than the previous reciprocal debt transform. When enabled, dormant-window priority is applied before this normal score ordering and is not folded into the score itself.
 
 If stale quota cache is temporarily reused, the toast also shows the cache age. Guard-based ranking and fast-mode guard pressure both age cached windows by that elapsed cache time instead of treating the cached reset time as brand new.
 
