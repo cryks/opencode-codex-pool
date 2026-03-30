@@ -102,9 +102,9 @@ Default config:
 ```json
 {
   "fast-mode": "auto",
-  "sticky-mode": "auto",
+  "sticky-mode": "always",
   "sticky-strength": 1,
-  "dormant-touch": "always"
+  "dormant-touch": "new-session-only"
 }
 ```
 

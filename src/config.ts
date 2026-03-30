@@ -28,9 +28,9 @@ export const DEFAULT_CONFIG_PATH = join(
 
 export const DEFAULT_CONFIG: PoolConfig = {
   fastMode: "auto",
-  stickyMode: "auto",
+  stickyMode: "always",
   stickyStrength: 1,
-  dormantTouch: "always",
+  dormantTouch: "new-session-only",
 };
 
 function object(value: unknown): value is Record<string, unknown> {
