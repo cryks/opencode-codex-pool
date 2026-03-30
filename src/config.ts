@@ -4,12 +4,13 @@ import { homedir } from "node:os";
 
 export type FastMode = "auto" | "always" | "disabled";
 export type StickyMode = "auto" | "always" | "disabled";
+export type DormantTouchMode = "always" | "disabled" | "new-session-only";
 
 export interface PoolConfig {
   fastMode: FastMode;
   stickyMode: StickyMode;
   stickyStrength: number;
-  dormantTouch: boolean;
+  dormantTouch: DormantTouchMode;
 }
 
 export interface ConfigState {
@@ -29,7 +30,7 @@ export const DEFAULT_CONFIG: PoolConfig = {
   fastMode: "auto",
   stickyMode: "auto",
   stickyStrength: 1,
-  dormantTouch: true,
+  dormantTouch: "always",
 };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -74,8 +75,14 @@ function parse(value: unknown): PoolConfig {
 
   const dormantTouch = value["dormant-touch"];
   if (dormantTouch !== undefined) {
-    if (typeof dormantTouch !== "boolean") {
-      throw new Error('"dormant-touch" must be a boolean');
+    if (
+      dormantTouch !== "always" &&
+      dormantTouch !== "disabled" &&
+      dormantTouch !== "new-session-only"
+    ) {
+      throw new Error(
+        '"dormant-touch" must be "always", "disabled", or "new-session-only"',
+      );
     }
   }
 

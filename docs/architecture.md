@@ -183,7 +183,11 @@ Fast mode uses the same usage data as routing and stays off when limits are bloc
 
 Dormant windows are handled separately from the normal score.
 
-When `dormant-touch = true` and an account exposes an untouched dormant `rate_limit` window, that account is temporarily promoted ahead of normal quota ranking for one successful request.
+`dormant-touch` modes:
+
+- `always`: promote an account with an untouched dormant `rate_limit` window ahead of normal quota ranking for one successful request
+- `new-session-only`: allow that promotion only before the current request has active sticky affinity
+- `disabled`: skip dormant-touch promotion entirely
 
 An untouched dormant window means:
 

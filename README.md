@@ -104,7 +104,7 @@ Default config:
   "fast-mode": "auto",
   "sticky-mode": "auto",
   "sticky-strength": 1,
-  "dormant-touch": true
+  "dormant-touch": "always"
 }
 ```
 
@@ -132,8 +132,9 @@ Restart opencode after editing the file.
 
 #### `dormant-touch`
 
-- `true`: start untouched dormant windows once before normal score ordering
-- `false`: disable that promotion path
+- `always`: start untouched dormant windows once before normal score ordering
+- `new-session-only`: allow dormant-touch only before a session has active sticky affinity
+- `disabled`: disable that promotion path
 
 If the config file is invalid, the plugin falls back to defaults and shows a warning toast.
 

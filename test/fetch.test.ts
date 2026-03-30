@@ -236,7 +236,7 @@ function config(over: Partial<PoolConfig> = {}): PoolConfig {
     fastMode: "auto",
     stickyMode: "auto",
     stickyStrength: 1,
-    dormantTouch: true,
+    dormantTouch: "always",
     ...over,
   };
 }
@@ -3485,7 +3485,7 @@ describe("createFetch", () => {
       store,
       async () => auth(),
       client,
-      config({ dormantTouch: false }),
+      config({ dormantTouch: "disabled" }),
     );
     const res = await run("https://api.openai.com/v1/responses");
 
@@ -4371,6 +4371,67 @@ describe("createFetch", () => {
     expect(hits).toEqual([
       "Bearer pool-sticky-force-access",
       "Bearer pool-sticky-force-access",
+    ]);
+  });
+
+  test("dormant-touch new-session-only does not override an active sticky session", async () => {
+    store.upsert(row("core-sticky-dormant", 0, { primary: 1 }));
+    store.setPrimary("core-sticky-dormant");
+    store.upsert(row("pool-sticky-dormant", 1));
+
+    store.cacheUsage("core-sticky-dormant", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+    store.cacheUsage("pool-sticky-dormant", scored(0.55));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({
+        stickyMode: "always",
+        dormantTouch: "new-session-only",
+      }),
+    );
+    const body = JSON.stringify({ prompt_cache_key: "ses-sticky-dormant" });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    store.cacheUsage("core-sticky-dormant", scored(0.52));
+    store.cacheUsage("pool-sticky-dormant", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+
+    await run("https://api.openai.com/v1/responses", { body });
+
+    expect(hits).toEqual([
+      "Bearer core-sticky-dormant-access",
+      "Bearer core-sticky-dormant-access",
     ]);
   });
 

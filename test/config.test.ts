@@ -50,7 +50,7 @@ describe("config", () => {
       JSON.stringify({
         "sticky-mode": "always",
         "sticky-strength": 2.5,
-        "dormant-touch": false,
+        "dormant-touch": "new-session-only",
       }),
     );
 
@@ -58,7 +58,7 @@ describe("config", () => {
       ...DEFAULT_CONFIG,
       stickyMode: "always",
       stickyStrength: 2.5,
-      dormantTouch: false,
+      dormantTouch: "new-session-only",
     });
   });
 
@@ -108,7 +108,7 @@ describe("config", () => {
     paths.push(dir);
 
     mkdirSync(dir, { recursive: true });
-    await Bun.write(path, JSON.stringify({ "dormant-touch": "nope" }));
+    await Bun.write(path, JSON.stringify({ "dormant-touch": true }));
     const state = await readConfig(path);
 
     expect(state.config).toEqual(DEFAULT_CONFIG);
