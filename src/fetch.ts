@@ -452,6 +452,25 @@ function touchReason(touches: string[]) {
   return `touch dormant windows (${touches.join(", ")})`;
 }
 
+function touchScore(touches: string[]) {
+  if (touches.includes("rate.secondary")) return 2;
+  if (touches.includes("rate.primary")) return 1;
+  return 0;
+}
+
+function orderTouches(rows: Row[], scores: Map<string, number>, touches: Map<string, number>) {
+  return [...rows].sort((a, b) => {
+    const left = touches.get(a.id) ?? 0;
+    const right = touches.get(b.id) ?? 0;
+    if (left !== right) return right - left;
+
+    const low = scores.get(a.id) ?? 0;
+    const high = scores.get(b.id) ?? 0;
+    if (low !== high) return high - low;
+    return a.priority - b.priority;
+  });
+}
+
 function describe(scores: ScoreView[], reason: string, pick: string) {
   const planWidth = Math.max(...scores.map((item) => item.plan.length));
   const scoreWidth = Math.max(
@@ -1535,11 +1554,13 @@ function rank(
   const preferred = list.filter((item) => item.touches.length > 0);
   if (preferred.length > 0) {
     const scores = new Map(preferred.map((item) => [item.id, item.score ?? 0]));
+    const touches = new Map(preferred.map((item) => [item.id, touchScore(item.touches)]));
     const picked = rows.filter((row) => preferred.some((item) => item.id === row.id));
-    const top = order(picked, scores)[0];
+    const ranked = orderTouches(picked, scores, touches);
+    const top = ranked[0];
     const detail = preferred.find((item) => item.id === top?.id);
     return {
-      rows: order(picked, scores),
+      rows: ranked,
       scores: list,
       reason: touchReason(detail?.touches ?? []),
     };

@@ -549,7 +549,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     const res = await run("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -604,7 +609,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     const first = await run("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1491,7 +1501,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     await run("https://api.openai.com/v1/responses", {
       method: "POST",
       body: JSON.stringify({ model: "gpt-5", input: "hi" }),
@@ -1538,7 +1553,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     const base = Date.now();
     Date.now = () => base;
     await run("https://api.openai.com/v1/responses", {
@@ -3438,6 +3458,61 @@ describe("createFetch", () => {
     ).toBeTrue();
   });
 
+  test("prefers accounts with untouched secondary dormant windows", async () => {
+    store.upsert(row("core-primary-dormant", 0, { primary: 1 }));
+    store.setPrimary("core-primary-dormant");
+    store.upsert(row("pool-secondary-dormant", 1));
+
+    store.cacheUsage("core-primary-dormant", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+      },
+    });
+    store.cacheUsage("pool-secondary-dormant", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          reset_after_seconds: 18_000,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 0,
+          reset_after_seconds: 604_800,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (url(input) !== CODEX_API_ENDPOINT) {
+        return new Response("unexpected usage fetch", { status: 500 });
+      }
+
+      const auth = new Headers(init?.headers).get("authorization");
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits).toEqual(["Bearer pool-secondary-dormant-access"]);
+    expect(
+      toasts.some((item) =>
+        item.message.includes("Because: touch dormant windows (rate.primary, rate.secondary)"),
+      ),
+    ).toBeTrue();
+  });
+
   test("can disable dormant touch priority from config", async () => {
     store.upsert(row("core-no-dormant-touch", 0, { primary: 1 }));
     store.setPrimary("core-no-dormant-touch");
@@ -4616,7 +4691,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     const body = JSON.stringify({ prompt_cache_key: "ses-yield" });
 
     await run("https://api.openai.com/v1/responses", { body });
@@ -4911,7 +4991,12 @@ describe("createFetch", () => {
     }) as typeof fetch;
 
     const { client } = stub();
-    const run = createFetch(store, async () => auth(), client);
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ stickyMode: "auto" }),
+    );
     const body = JSON.stringify({ prompt_cache_key: "ses-am" });
 
     // pool wins first (0.132 > 0.10), affinity = pool

@@ -136,6 +136,8 @@ Restart opencode after editing the file.
 - `new-session-only`: allow dormant-touch only before a session has active sticky affinity
 - `disabled`: disable that promotion path
 
+When multiple accounts are eligible for dormant-touch, an untouched `rate.secondary` window outranks accounts with only an untouched `rate.primary` window. Ties still fall back to score, then stored priority.
+
 If the config file is invalid, the plugin falls back to defaults and shows a warning toast.
 
 ---
