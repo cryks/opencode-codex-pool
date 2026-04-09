@@ -1,6 +1,6 @@
 # codex-pool
 
-An [opencode](https://github.com/nicepkg/opencode) plugin that pools multiple OpenAI Codex accounts and routes requests to whichever account has the most remaining quota.
+An opencode plugin that pools multiple OpenAI Codex accounts and routes requests to whichever account has the most remaining quota.
 
 ## Why
 
@@ -24,8 +24,8 @@ ChatGPT Pro and Plus plans have rate limits. If you have multiple accounts, you 
 
 ## Requirements
 
-- [Bun](https://bun.sh) runtime
-- [opencode](https://github.com/nicepkg/opencode) with the built-in Codex plugin enabled
+- Bun runtime
+- opencode with the built-in Codex plugin enabled
 - At least one ChatGPT Pro or Plus account
 
 ## Install
