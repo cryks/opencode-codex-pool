@@ -167,6 +167,11 @@ function scored(score: number, plan = "plus"): Usage {
       plan_type: plan,
       rate_limit: {
         allowed: false,
+        primary_window: {
+          used_percent: 100,
+          reset_after_seconds: 300,
+          limit_window_seconds: 18_000,
+        },
       },
     };
   }
@@ -2303,7 +2308,7 @@ describe("createFetch", () => {
     ]);
   });
 
-  test("shows stale age and blocked tags next to the account name in a fixed order", async () => {
+  test("shows stale age and blocked duration tags next to the account name in a fixed order", async () => {
     store.upsert(row("stale-block", 0, { plan_type: "plus" }));
 
     const staleAt = Date.now() - 120_000;
@@ -2323,7 +2328,7 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain(
-      "Account:\n> [plus] stale-block (2m ago, blocked): 0.000",
+      "Account:\n> [plus] stale-block (2m ago, blocked 03m):\n    0.000",
     );
   });
 

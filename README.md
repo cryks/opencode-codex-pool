@@ -16,7 +16,7 @@ ChatGPT Pro and Plus plans have rate limits. If you have multiple accounts, you 
 
 **Sticky sessions.** Once a session uses an account successfully, it sticks to that account for 5 minutes to keep OpenAI's server-side prompt cache warm. It only switches when the quota gap is large enough to justify the cache miss.
 
-**Automatic failover.** If an account hits its rate limit, the request immediately retries on the next-best account. The blocked account is put on cooldown until its limit resets.
+**Automatic failover.** If an account hits its rate limit, the request immediately retries on the next-best account. The blocked account is put on cooldown until its limit resets, and selection toasts show the remaining blocked time as `XXh YYm` or `YYm` when usage data includes a reset timer.
 
 **Cross-process safety.** Account state, usage cache, cooldowns, and token refresh locks live in SQLite. Multiple opencode processes share the same data without redundant API calls or race conditions.
 

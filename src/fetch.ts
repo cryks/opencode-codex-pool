@@ -81,6 +81,7 @@ interface ScoreView {
   plan: string;
   role: "core" | "pool";
   score?: number;
+  blockedFor?: number;
   source: ScoreSource;
   touches: string[];
   deciding?: string;
@@ -151,6 +152,7 @@ interface ReadyWindow {
 
 interface ScoreHit {
   score: number | null;
+  blockedFor?: number;
   label?: string;
   windows: ScoreWindow[];
   main?: ScoreWindow;
@@ -390,6 +392,7 @@ function quota(
     plan: plan(row),
     role: role(row),
     score: hit?.score ?? undefined,
+    blockedFor: hit?.blockedFor,
     source: usage.source,
     touches: touching(config.dormantTouch, sticky)
       ? pendingTouches(touched, usage.body).map((item) => item.label)
@@ -427,10 +430,23 @@ function text(item: ScoreView, scoreWidth: number) {
 function title(item: ScoreView) {
   const tags = [
     item.source === "stale" ? item.age ?? "cached" : null,
-    item.score === 0 ? "blocked" : null,
+    item.score === 0 ? blockedLabel(item.blockedFor) : null,
   ].filter((value): value is string => value !== null);
   if (tags.length === 0) return item.name;
   return `${item.name} (${tags.join(", ")})`;
+}
+
+function blockedLabel(secs?: number) {
+  if (typeof secs !== "number") return "blocked";
+  return `blocked ${clock(secs)}`;
+}
+
+function clock(secs: number) {
+  const mins = Math.max(0, Math.ceil(secs / 60));
+  const hours = Math.floor(mins / 60);
+  const rest = (mins % 60).toString().padStart(2, "0");
+  if (hours === 0) return `${rest}m`;
+  return `${hours.toString().padStart(2, "0")}h ${rest}m`;
 }
 
 function line(
@@ -442,7 +458,7 @@ function line(
   const head = item.id === pick ? ">" : " ";
   const tier = `[${item.plan}]`.padEnd(planWidth + 2);
   const prefix = `${head} ${tier} ${title(item)}:`;
-  if (item.windows.length === 0) return `${prefix} ${text(item, scoreWidth)}`;
+  if (item.windows.length === 0 && item.score !== 0) return `${prefix} ${text(item, scoreWidth)}`;
   return `${prefix}\n    ${text(item, scoreWidth)}`;
 }
 
@@ -757,6 +773,15 @@ function blocked(limit?: Limit) {
   if (!limit) return false;
   if (limit.allowed === false) return true;
   return limit.limit_reached === true;
+}
+
+function blockedFor(limit?: Limit, age = 0) {
+  if (!limit) return undefined;
+  const list = [limit.primary_window, limit.secondary_window]
+    .map((win) => win?.reset_after_seconds)
+    .filter((secs): secs is number => typeof secs === "number" && Number.isFinite(secs) && secs >= 0);
+  if (list.length === 0) return undefined;
+  return Math.max(0, Math.max(...list) - age);
 }
 
 function readyWindow(win?: Window): ReadyWindow | null | undefined {
@@ -1219,7 +1244,7 @@ function limitScore(
   age = 0,
 ): ScoreHit | null {
   if (!limit) return null;
-  if (blocked(limit)) return { score: 0, label, windows: [] };
+  if (blocked(limit)) return { score: 0, blockedFor: blockedFor(limit, age), label, windows: [] };
 
   const list = dedupeWindows(
     [
