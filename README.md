@@ -1,61 +1,43 @@
 # codex-pool
 
-Use multiple ChatGPT Codex OAuth accounts through a single `openai` provider in opencode.
+An [opencode](https://github.com/nicepkg/opencode) plugin that pools multiple OpenAI Codex accounts and routes requests to whichever account has the most remaining quota.
 
-`codex-pool` keeps your primary account in normal Codex mode, then uses extra accounts as overflow capacity when quota gets tight.
+## Why
 
----
+ChatGPT Pro and Plus plans have rate limits. If you have multiple accounts, you can use them together. codex-pool scores each account by remaining capacity, picks the best one for every request, fails over to another account when one hits its limit, and toggles fast-mode (OpenAI's priority processing tier) based on real-time quota headroom.
 
-## Why use it?
+## Features
 
-If you already use opencode with Codex, this plugin helps you stay productive longer without manually swapping accounts.
+**Quota-aware routing.** Every account is scored by how much capacity it has left. Pro accounts get higher weight to reflect their larger rate limits, compressed with a square root so they don't always win. The highest-scoring account handles the next request.
 
-- keep your primary `openai` account as the normal Codex account
-- add extra ChatGPT accounts as a shared pool
-- route each request to the healthiest account instead of rotating blindly
-- fail over on `429` to the next eligible account
-- preserve short-lived session affinity to avoid unnecessary prompt-cache misses
-- refresh OAuth tokens automatically
-- share quota cache, cooldowns, and locks across multiple opencode processes
+**Automatic fast-mode.** When quota is healthy enough, the plugin enables OpenAI's priority processing tier for faster responses. When headroom tightens, it drops back to default. The threshold is score-based, not a fixed percentage.
 
----
+**Dormant window activation.** Rate-limit windows that haven't been touched yet (0% used, full timer remaining) get promoted once to start their timer. This avoids wasting windows that would otherwise sit idle until they expire.
 
-## How it works
+**Sticky sessions.** Once a session uses an account successfully, it sticks to that account for 5 minutes to keep OpenAI's server-side prompt cache warm. It only switches when the quota gap is large enough to justify the cache miss.
 
-`codex-pool` sits on top of opencode's built-in Codex flow.
+**Automatic failover.** If an account hits its rate limit, the request immediately retries on the next-best account. The blocked account is put on cooldown until its limit resets.
 
-It mirrors your primary OAuth account so opencode still behaves like normal Codex, then overrides the request fetch path to choose the best account for each prompt attempt.
+**Cross-process safety.** Account state, usage cache, cooldowns, and token refresh locks live in SQLite. Multiple opencode processes share the same data without redundant API calls or race conditions.
 
-At a high level:
+**Multi-window ranking.** When an account has multiple rate-limit windows (e.g. 5-hour and 7-day), the longest window drives the score. Shorter windows act as guardrails that can pull the score down if they're running low.
 
-1. keep the primary account as the Codex-compatible `openai` account
-2. store extra accounts in a shared SQLite database
-3. score available accounts from current quota data
-4. send the request through the best candidate
-5. retry after refresh on `401`
-6. fail over to the next candidate on `429`
+## Requirements
 
-This is quota-aware priority routing, not round-robin rotation.
+- [Bun](https://bun.sh) runtime
+- [opencode](https://github.com/nicepkg/opencode) with the built-in Codex plugin enabled
+- At least one ChatGPT Pro or Plus account
 
-If you want the internal model, see [docs/architecture.md](docs/architecture.md).
+## Install
 
----
-
-## Quick start
-
-### 1. Install dependencies
-
-```bash
+```sh
+git clone https://github.com/nicepkg/codex-pool.git
+cd codex-pool
 bun install
-```
-
-### 2. Build the plugin
-
-```bash
 bun run build
 ```
 
-### 3. Register the plugin in opencode
+Add to your opencode config (`~/.config/opencode/config.json`):
 
 ```json
 {
@@ -63,7 +45,7 @@ bun run build
 }
 ```
 
-For local development, you can point opencode at the source entry instead:
+For development, you can point at the TypeScript source directly since Bun handles it:
 
 ```json
 {
@@ -71,33 +53,31 @@ For local development, you can point opencode at the source entry instead:
 }
 ```
 
-### 4. Add accounts
+## Setup
 
-The plugin adds these auth actions in opencode:
+### Primary account
 
-- `Login primary Codex account (browser)`
-- `Login primary Codex account (headless)`
-- `Add pool account (browser)`
-- `Add pool account (headless)`
-- `Edit pool accounts`
+Your existing opencode Codex OAuth login becomes the primary account. If you haven't logged in yet, use one of the auth methods in opencode:
 
-Recommended setup order:
+- **Login primary Codex account (browser)** opens the standard OAuth flow.
+- **Login primary Codex account (headless)** uses the device-code flow for headless environments.
 
-1. log in your main `openai` account as the primary account
-2. add one or more extra accounts as pool accounts
-3. keep using opencode normally
+### Pool accounts
 
-If opencode already has a valid OAuth login for the default `openai` account, `codex-pool` bootstraps it automatically on first load.
+Add more accounts from the auth menu:
 
----
+- **Add pool account (browser)**
+- **Add pool account (headless)**
 
-## What gets configured
+Each pool account is stored in SQLite and joins the routing pool alongside the primary.
 
-On startup, the plugin ensures this config file exists:
+### Managing accounts
 
-`~/.config/opencode/codex-pool.json`
+**Edit pool accounts** in the auth menu lists current pool accounts and lets you remove them.
 
-Default config:
+## Configuration
+
+codex-pool reads `~/.config/opencode/codex-pool.json` on startup. Auto-created with defaults if missing.
 
 ```json
 {
@@ -108,83 +88,49 @@ Default config:
 }
 ```
 
-Restart opencode after editing the file.
-
 ### Options
 
-#### `fast-mode`
+| Key | Values | Default | Description |
+|---|---|---|---|
+| `fast-mode` | `"auto"` `"always"` `"disabled"` | `"auto"` | `auto` enables priority tier when quota is healthy. `always` forces it. `disabled` never adds it. |
+| `sticky-mode` | `"auto"` `"always"` `"disabled"` | `"always"` | `always` holds the session on its account for the full affinity window. `auto` allows switching when the score gap is large enough. `disabled` routes purely by score. |
+| `sticky-strength` | Number >= 0 | `1` | Multiplier for the sticky switch margin in `auto` mode. `0` disables the margin. Higher values make sessions stickier. |
+| `dormant-touch` | `"always"` `"new-session-only"` `"disabled"` | `"new-session-only"` | Controls whether untouched quota windows are promoted to start their timer. `new-session-only` only does this before a session has sticky affinity. |
 
-- `auto`: add `service_tier: "priority"` only when the selected account still looks healthy
-- `always`: always add `service_tier: "priority"` when the caller did not already set a tier
-- `disabled`: never add plugin-managed fast mode
+## How it works
 
-#### `sticky-mode`
+codex-pool hooks into opencode's `provider: "openai"` auth loader. The built-in Codex plugin runs first (model filtering, cost zeroing), then codex-pool replaces the `fetch` function.
 
-- `auto`: keep short-lived session affinity unless another account is materially better
-- `always`: hold the sticky account for the affinity window unless it becomes unavailable
-- `disabled`: always use fresh score ordering
+On each request:
 
-#### `sticky-strength`
+1. **Usage fetch.** Real-time quota is pulled from each account's usage endpoint. Results are cached in SQLite for 60s and shared across processes. A background poller revalidates active accounts every 30s.
 
-- `1`: default switching resistance
-- `0`: no extra sticky margin
-- `>1`: stronger resistance to switching accounts during a sticky session
+2. **Scoring.** Each account's rate-limit windows are scored by remaining capacity, normalized for window size and recovery time. Highest composite score wins.
 
-#### `dormant-touch`
+3. **Dispatch.** The request goes to the top-scored account (or the sticky account if affinity is active and the gap isn't big enough to justify switching). If the score clears the fast-mode threshold, the priority processing tier is enabled for this request.
 
-- `always`: start untouched dormant windows once before normal score ordering
-- `new-session-only`: allow dormant-touch only before a session has active sticky affinity
-- `disabled`: disable that promotion path
+4. **Failover.** If the account hits its rate limit, it goes on cooldown and the request retries on the next candidate. If the account's token has expired, it gets refreshed (coordinated via SQLite lock) and retried once before disabling the account.
 
-When multiple accounts are eligible for dormant-touch, an untouched `rate.secondary` window outranks accounts with only an untouched `rate.primary` window. Ties still fall back to score, then stored priority.
+## Data storage
 
-If the config file is invalid, the plugin falls back to defaults and shows a warning toast.
+| Path | Purpose |
+|---|---|
+| `~/.config/opencode/codex-pool.json` | Plugin configuration |
+| `~/.local/share/opencode/codex-pool.db` | Accounts, tokens, cooldowns, locks, usage cache |
 
----
-
-## Why routing feels better
-
-Most multi-account setups stop at simple failover or manual switching.
-
-`codex-pool` goes further by choosing accounts based on current quota health and keeping short-lived session affinity when it helps.
-
-Highlights:
-
-- **quota-aware routing** instead of blind rotation
-- **strict `429` failover** to the next eligible account
-- **sticky affinity** to avoid unnecessary prompt-cache misses
-- **optional fast mode** for healthy accounts
-- **shared SQLite state** across multiple opencode processes
-
-For the internal routing model, storage layout, and retry rules, see [docs/architecture.md](docs/architecture.md).
-
----
+The primary account is mirrored to opencode's `auth.json` for `isCodex` detection. Pool accounts live only in SQLite.
 
 ## Development
 
-Run the core checks from this directory:
-
-```bash
-bun test
-bun run typecheck
-bun run build
+```sh
+bun install
+bun test           # run tests
+bun run typecheck   # type-check
+bun run build       # produce dist/
 ```
 
-Tests use real SQLite databases rather than mocks.
+Tests use real SQLite (in-memory or temp files), not mocks.
 
----
+## License
 
-## Limitations
-
-- if all available accounts are rate-limited, the last `429` response is returned
-- accounts are disabled only after a durable auth failure, not after transient request issues
-- failed quota fetches do not permanently poison routing
-- request bodies are snapshotted before retries so refresh and failover can safely replay them
-
----
-
-## Status
-
-This project is currently marked `private` in `package.json` and is structured as an external opencode plugin.
-
-If you want to publish it as an npm package later, the current README structure should already fit that transition well.
+MIT
