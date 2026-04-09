@@ -2328,7 +2328,83 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(toasts[0]?.message).toContain(
-      "Account:\n> [plus] stale-block (2m ago, blocked 03m):\n    0.000",
+      "Account:\n> [plus] stale-block (2m ago, blocked 3m):\n    0.000",
+    );
+  });
+
+  test("uses the blocking primary window reset in blocked toast tags", async () => {
+    store.upsert(row("block-primary", 0, { plan_type: "plus" }));
+
+    store.cacheUsage("block-primary", {
+      plan_type: "plus",
+      rate_limit: {
+        allowed: false,
+        primary_window: {
+          used_percent: 100,
+          reset_after_seconds: 180,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 40,
+          reset_after_seconds: 3_600,
+          limit_window_seconds: 86_400,
+        },
+      },
+    });
+
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) return usage(90, 600);
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain(
+      "Account:\n> [plus] block-primary (blocked 3m):\n    0.000",
+    );
+  });
+
+  test("uses the blocking secondary window reset in blocked toast tags", async () => {
+    store.upsert(row("block-secondary", 0, { plan_type: "plus" }));
+
+    store.cacheUsage("block-secondary", {
+      plan_type: "plus",
+      rate_limit: {
+        allowed: false,
+        primary_window: {
+          used_percent: 70,
+          reset_after_seconds: 180,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 100,
+          reset_after_seconds: 3_900,
+          limit_window_seconds: 86_400,
+        },
+      },
+    });
+
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) return usage(90, 600);
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain(
+      "Account:\n> [plus] block-secondary (blocked 1h 5m):\n    0.000",
     );
   });
 

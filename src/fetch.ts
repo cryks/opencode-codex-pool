@@ -444,9 +444,9 @@ function blockedLabel(secs?: number) {
 function clock(secs: number) {
   const mins = Math.max(0, Math.ceil(secs / 60));
   const hours = Math.floor(mins / 60);
-  const rest = (mins % 60).toString().padStart(2, "0");
+  const rest = mins % 60;
   if (hours === 0) return `${rest}m`;
-  return `${hours.toString().padStart(2, "0")}h ${rest}m`;
+  return `${hours}h ${rest}m`;
 }
 
 function line(
@@ -777,11 +777,32 @@ function blocked(limit?: Limit) {
 
 function blockedFor(limit?: Limit, age = 0) {
   if (!limit) return undefined;
-  const list = [limit.primary_window, limit.secondary_window]
-    .map((win) => win?.reset_after_seconds)
-    .filter((secs): secs is number => typeof secs === "number" && Number.isFinite(secs) && secs >= 0);
+  const list = [
+    { name: "primary", win: limit.primary_window },
+    { name: "secondary", win: limit.secondary_window },
+  ]
+    .map((item) => ({
+      name: item.name,
+      used: item.win?.used_percent,
+      secs: item.win?.reset_after_seconds,
+    }))
+    .filter(
+      (item): item is { name: "primary" | "secondary"; used: number | undefined; secs: number } =>
+        typeof item.secs === "number" && Number.isFinite(item.secs) && item.secs >= 0,
+    );
   if (list.length === 0) return undefined;
-  return Math.max(0, Math.max(...list) - age);
+  const best = list.reduce((win, item) => {
+    const left = typeof item.used === "number" && Number.isFinite(item.used) ? item.used : -1;
+    const right = typeof win.used === "number" && Number.isFinite(win.used) ? win.used : -1;
+    if (left !== right) return left > right ? item : win;
+    if (item.name !== win.name) {
+      if (item.name === "primary") return item;
+      if (win.name === "primary") return win;
+    }
+    if (item.secs !== win.secs) return item.secs < win.secs ? item : win;
+    return win;
+  });
+  return Math.max(0, best.secs - age);
 }
 
 function readyWindow(win?: Window): ReadyWindow | null | undefined {
