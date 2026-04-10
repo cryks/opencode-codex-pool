@@ -8,7 +8,8 @@ import type { Store } from "../src/store";
 import { CAPACITY_REF } from "../src/types";
 import type { Account, Usage } from "../src/types";
 
-const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
+const PROLITE_PLAN_WEIGHT = Math.sqrt(5);
+const PRO_PLAN_WEIGHT = Math.sqrt(20);
 
 function row(
   id: string,
@@ -46,7 +47,12 @@ function scored(score: number, plan = "plus"): Usage {
     };
   }
 
-  const weight = plan === "pro" ? PRO_PLAN_WEIGHT : 1;
+  const weight =
+    plan === "pro"
+      ? PRO_PLAN_WEIGHT
+      : plan === "prolite"
+        ? PROLITE_PLAN_WEIGHT
+        : 1;
   const span = CAPACITY_REF * (score / weight) ** 2;
   return {
     plan_type: plan,

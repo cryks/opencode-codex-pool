@@ -36,7 +36,8 @@ const SWITCH_MARGIN = 0.35;
 const AFFINITY_MS = 300_000;
 const DORMANT_TOUCH_MS = 30 * 60 * 1000;
 const CONSERVATION_CAP = 1 + Math.log(CONSERVATION_HORIZON / CONSERVATION_REF);
-const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
+const PROLITE_PLAN_WEIGHT = Math.sqrt(5);
+const PRO_PLAN_WEIGHT = Math.sqrt(20);
 
 interface Affinity {
   id?: string;
@@ -248,6 +249,7 @@ function boost(left: number, time: number) {
 function weight(plan?: string) {
   const key = plan?.toLowerCase();
   if (key === "pro") return PRO_PLAN_WEIGHT;
+  if (key === "prolite") return PROLITE_PLAN_WEIGHT;
   if (key === "plus") return 1;
   if (key === "team") return 1;
   return 1;
@@ -309,8 +311,15 @@ function role(row: Row): "core" | "pool" {
   return row.primary === 1 ? "core" : "pool";
 }
 
+function shortPlan(plan?: string | null) {
+  const key = plan?.toLowerCase();
+  if (key === "prolite") return "pro5";
+  if (key === "pro") return "pro20";
+  return plan ?? "unknown";
+}
+
 function plan(row: Row) {
-  return row.plan_type ?? "unknown";
+  return shortPlan(row.plan_type);
 }
 
 function resetDeadline(hit: UsageHit) {

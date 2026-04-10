@@ -21,7 +21,8 @@ import {
 } from "../src/types";
 import type { Account, Usage } from "../src/types";
 
-const PRO_PLAN_WEIGHT = Math.sqrt(6.7);
+const PROLITE_PLAN_WEIGHT = Math.sqrt(5);
+const PRO_PLAN_WEIGHT = Math.sqrt(20);
 const CONSERVATION_REF = 14_400;
 const HEALTH_RANGE = 0.2;
 const HEALTH_BONUS = 0.12;
@@ -176,7 +177,12 @@ function scored(score: number, plan = "plus"): Usage {
     };
   }
 
-  const weight = plan === "pro" ? PRO_PLAN_WEIGHT : 1;
+  const weight =
+    plan === "pro"
+      ? PRO_PLAN_WEIGHT
+      : plan === "prolite"
+        ? PROLITE_PLAN_WEIGHT
+        : 1;
   const span = CAPACITY_REF * 10;
   const reset = 300;
   const cap = Math.sqrt(span / CAPACITY_REF);
@@ -1134,7 +1140,7 @@ describe("createFetch", () => {
         title: "Codex Pool",
         message: fastToast(
           false,
-            "Accounts:\n> [plus] account1@foobar.com:\n    [5h] 123.456\n  [pro]  account2@a.com:\n    [5h]   4.567",
+            "Accounts:\n> [plus]  account1@foobar.com:\n    [5h] 123.456\n  [pro20] account2@a.com:\n    [5h]   4.567",
           "higher score",
           "no data",
           [],
@@ -1145,6 +1151,28 @@ describe("createFetch", () => {
         duration: 10_000,
       },
     ]);
+  });
+
+  test("shows prolite as pro5 in toast labels", async () => {
+    store.upsert(row("core-plan-short", 0, { primary: 1, plan_type: "plus" }));
+    store.setPrimary("core-plan-short");
+    store.upsert(row("pool-plan-short", 1, { plan_type: "prolite" }));
+    store.cacheUsage("core-plan-short", scored(2));
+    store.cacheUsage("pool-plan-short", scored(1));
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain("[pro5]");
   });
 
   test("requests without prompt_cache_key do not keep sticky affinity", async () => {
@@ -3302,6 +3330,128 @@ describe("createFetch", () => {
     expect(hits).toEqual([
       "Bearer core-unknown-access",
       "Bearer core-unknown-access",
+    ]);
+  });
+
+  test("prefers prolite over plus at the same quota state", async () => {
+    store.upsert(row("core-plus-weight", 0, { primary: 1 }));
+    store.setPrimary("core-plus-weight");
+    store.upsert(row("pool-prolite-weight", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-plus-weight-access") {
+          return usage({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        if (auth === "Bearer pool-prolite-weight-access") {
+          return usage({
+            plan_type: "prolite",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        throw new Error(`unexpected usage auth: ${auth}`);
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-plus-weight-access",
+      "Bearer pool-prolite-weight-access",
+    ]);
+  });
+
+  test("prefers pro over prolite at the same quota state", async () => {
+    store.upsert(row("core-prolite-weight", 0, { primary: 1 }));
+    store.setPrimary("core-prolite-weight");
+    store.upsert(row("pool-pro-weight", 1));
+
+    const hits: string[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const target = url(input);
+      const auth = new Headers(init?.headers).get("authorization");
+
+      if (target === CODEX_USAGE_ENDPOINT) {
+        if (auth === "Bearer core-prolite-weight-access") {
+          return usage({
+            plan_type: "prolite",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        if (auth === "Bearer pool-pro-weight-access") {
+          return usage({
+            plan_type: "pro",
+            rate_limit: {
+              primary_window: {
+                used_percent: 50,
+                reset_after_seconds: 600,
+                limit_window_seconds: 18_000,
+              },
+            },
+          });
+        }
+
+        throw new Error(`unexpected usage auth: ${auth}`);
+      }
+
+      hits.push(auth ?? "");
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client } = stub();
+    const run = createFetch(store, async () => auth(), client);
+
+    await run("https://api.openai.com/v1/responses");
+    await Bun.sleep(0);
+    const second = await run("https://api.openai.com/v1/responses");
+
+    expect(second.status).toBe(200);
+    expect(hits).toEqual([
+      "Bearer core-prolite-weight-access",
+      "Bearer pool-pro-weight-access",
     ]);
   });
 

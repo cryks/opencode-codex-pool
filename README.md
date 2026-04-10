@@ -8,7 +8,9 @@ ChatGPT Pro and Plus plans have rate limits. If you have multiple accounts, you 
 
 ## Features
 
-**Quota-aware routing.** Every account is scored by how much capacity it has left. Pro accounts get higher weight to reflect their larger rate limits, compressed with a square root so they don't always win. The highest-scoring account handles the next request.
+**Quota-aware routing.** Every account is scored by how much capacity it has left. Plan weights follow the official quota ratios, compressed with a square root so larger plans stay favored without always winning. Current weights are Plus/Team/default = `1`, Pro (5x Plus) = `sqrt(5)`, and Pro (20x Plus) = `sqrt(20)`. The highest-scoring account handles the next request.
+
+Selection toasts use compact internal plan labels to keep columns aligned: `plus`, `team`, `pro5`, and `pro20`.
 
 **Automatic fast-mode.** When quota is healthy enough, the plugin enables OpenAI's priority processing tier for faster responses. When headroom tightens, it drops back to default. The threshold is score-based, not a fixed percentage.
 
@@ -26,7 +28,7 @@ ChatGPT Pro and Plus plans have rate limits. If you have multiple accounts, you 
 
 - Bun runtime
 - opencode with the built-in Codex plugin enabled
-- At least one ChatGPT Pro or Plus account
+- At least one ChatGPT Pro (5x), Pro (20x), or Plus account
 
 ## Install
 
