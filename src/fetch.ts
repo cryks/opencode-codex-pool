@@ -103,6 +103,7 @@ interface ScoreGuard {
   name: string;
   factor: number;
   score: number;
+  weight?: number;
 }
 
 interface RankResult {
@@ -151,6 +152,14 @@ interface ReadyWindow {
   limit_window_seconds: number;
 }
 
+interface GuardView {
+  label: string;
+  name: string;
+  ready: ReadyWindow;
+  floor: number;
+  score: number;
+}
+
 interface ScoreHit {
   score: number | null;
   blockedFor?: number;
@@ -180,6 +189,14 @@ interface FastWindowView {
   ready?: ReadyWindow;
 }
 
+interface FastGuardView extends FastWindowView {
+  ready: ReadyWindow;
+  score: number;
+  span: number;
+  cost: number;
+  weight: number;
+}
+
 interface FastView {
   fast: boolean;
   rule: string;
@@ -195,7 +212,7 @@ interface FastView {
 
 interface FastProfile {
   main: FastWindowView;
-  guard?: FastWindowView;
+  guard?: FastGuardView;
   score: number;
   cost: number;
   guards: FastWindowView[];
@@ -849,6 +866,13 @@ function aged(win: ReadyWindow, age = 0): ReadyWindow {
   } satisfies ReadyWindow;
 }
 
+function guardWeight(main: ReadyWindow, guard: ReadyWindow, age = 0) {
+  const lead = aged(main, age);
+  const follow = aged(guard, age);
+  const gap = lead.reset_after_seconds - follow.reset_after_seconds;
+  return clamp(gap / follow.limit_window_seconds, 0, 1);
+}
+
 function dormantWindow(label: string, win: Window | undefined): TouchWindow | null {
   const ready = readyWindow(win);
   if (!ready) return null;
@@ -986,33 +1010,38 @@ function inspectFastUsage(usage: Usage) {
 
 function profile(windows: FastWindowView[], age = 0): FastProfile | null {
   const rate = windows.filter(
-    (item): item is FastWindowView & { score: number; span: number } =>
+    (item): item is FastWindowView & { score: number; span: number; ready: ReadyWindow } =>
       item.label.startsWith("rate.") &&
       item.state === "scored" &&
       typeof item.score === "number" &&
-      typeof item.span === "number",
+      typeof item.span === "number" &&
+      item.ready !== undefined,
   );
   if (rate.length === 0) return null;
 
   const main = rate.reduce((best, item) => (item.span > best.span ? item : best));
   const guards = windows.filter(
-    (item): item is FastWindowView & { score: number; span: number } =>
+    (item): item is FastWindowView & { score: number; span: number; ready: ReadyWindow } =>
       item.label !== main.label &&
       item.state === "scored" &&
       typeof item.score === "number" &&
-      typeof item.span === "number",
+      typeof item.span === "number" &&
+      item.ready !== undefined,
   );
   const guard = guards.reduce<FastProfile["guard"]>((worst, item) => {
-    const adjusted = item.ready ? normalized(item.ready, 1, age)?.score ?? item.score : item.score;
+    const adjusted = normalized(item.ready, 1, age)?.score ?? item.score;
+    const weight = guardWeight(main.ready, item.ready, age);
+    const cost = weight * Math.max(0, -adjusted);
     const next = {
       ...item,
       score: adjusted,
-    } satisfies FastWindowView;
+      cost,
+      weight,
+    } satisfies FastGuardView;
     if (!worst) return next;
-    const score = worst.score ?? Number.POSITIVE_INFINITY;
-    return adjusted < score ? next : worst;
+    return cost > worst.cost ? next : worst;
   }, undefined);
-  const cost = Math.max(0, -(guard?.score ?? 0));
+  const cost = guard?.cost ?? 0;
   return {
     main,
     guard,
@@ -1210,28 +1239,19 @@ function rankWindow(label: string, win: Window | undefined, plan: number): RankW
   } satisfies RankWindow;
 }
 
-function guardScore(win: RankWindow, age = 0): ScoreGuard | null {
+function guardScore(win: RankWindow, age = 0): GuardView | null {
   if (!win.ready) return null;
   const used = clamp(win.ready.used_percent, 0, 100);
   const left = 1 - used / 100;
   const floor = left < FAST_MIN_LEFT ? left / FAST_MIN_LEFT : 1;
   const hit = normalized(win.ready, 1, age);
-  if (!hit) {
-    return {
-      label: win.label,
-      name: win.name,
-      factor: floor,
-      score: 0,
-    } satisfies ScoreGuard;
-  }
-
-  const factor = Math.min(floor, Math.min(1, Math.exp(hit.score)));
   return {
     label: win.label,
     name: win.name,
-    factor,
-    score: hit.score,
-  } satisfies ScoreGuard;
+    ready: win.ready,
+    floor,
+    score: hit?.score ?? 0,
+  } satisfies GuardView;
 }
 
 function reduceScore(list: RankWindow[], age = 0): ScoreHit | null {
@@ -1249,8 +1269,20 @@ function reduceScore(list: RankWindow[], age = 0): ScoreHit | null {
   const guard = guards.reduce<ScoreGuard | undefined>((worst, item) => {
     const next = guardScore(item, age);
     if (!next) return worst;
-    if (!worst) return next;
-    return next.factor < worst.factor ? next : worst;
+
+    const weight = guardWeight(main.ready, next.ready, age);
+    const pace = Math.min(1, Math.exp(weight * next.score));
+    const factor = Math.min(next.floor, pace);
+    const hit = {
+      label: next.label,
+      name: next.name,
+      factor,
+      score: next.score,
+      weight,
+    } satisfies ScoreGuard;
+
+    if (!worst) return hit;
+    return hit.factor < worst.factor ? hit : worst;
   }, undefined);
   if (!guard) return null;
 

@@ -219,6 +219,80 @@ function scored(score: number, plan = "plus"): Usage {
   };
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function windowScoreValue(
+  win: { used_percent: number; reset_after_seconds: number; limit_window_seconds: number },
+  plan = 1,
+) {
+  const used = clamp(win.used_percent, 0, 100);
+  const left = 1 - used / 100;
+  const time = clamp(win.reset_after_seconds / win.limit_window_seconds, 0, 1);
+  const cap = Math.sqrt(win.limit_window_seconds / CAPACITY_REF);
+  const health = left - time;
+  const scaled = Math.min(Math.max(health / HEALTH_RANGE, -1), 1);
+  const factor =
+    scaled >= 0 ? 1 + HEALTH_BONUS * scaled : 1 + HEALTH_PENALTY * scaled;
+  const pace = Math.max(time, 0.000001);
+  const conservation = Math.max(1, 1 + Math.log(win.reset_after_seconds / CONSERVATION_REF));
+  return ((plan * left * cap) / (pace * conservation)) * factor;
+}
+
+function normalizedScoreValue(
+  win: { used_percent: number; reset_after_seconds: number; limit_window_seconds: number },
+  age = 0,
+) {
+  const current = {
+    ...win,
+    reset_after_seconds: Math.max(0, win.reset_after_seconds - age),
+  };
+  const raw = windowScoreValue(current);
+  if (!(raw > 0)) return null;
+  const time = clamp(current.reset_after_seconds / current.limit_window_seconds, 0, 1);
+  const base = windowScoreValue({
+    used_percent: (1 - time) * 100,
+    reset_after_seconds: current.reset_after_seconds,
+    limit_window_seconds: current.limit_window_seconds,
+  });
+  if (!(base > 0)) return null;
+  return Math.log(raw / base);
+}
+
+function guardWeightValue(
+  main: { reset_after_seconds: number },
+  guard: { reset_after_seconds: number; limit_window_seconds: number },
+  age = 0,
+) {
+  const lead = Math.max(0, main.reset_after_seconds - age);
+  const follow = Math.max(0, guard.reset_after_seconds - age);
+  return clamp((lead - follow) / guard.limit_window_seconds, 0, 1);
+}
+
+function appliedGuardFactor(
+  main: { reset_after_seconds: number },
+  guard: { used_percent: number; reset_after_seconds: number; limit_window_seconds: number },
+  age = 0,
+) {
+  const left = 1 - clamp(guard.used_percent, 0, 100) / 100;
+  const floor = left < 0.03 ? left / 0.03 : 1;
+  const score = normalizedScoreValue(guard, age) ?? 0;
+  const weight = guardWeightValue(main, guard, age);
+  const pace = Math.min(1, Math.exp(weight * score));
+  return Math.min(floor, pace);
+}
+
+function appliedGuardCost(
+  main: { reset_after_seconds: number },
+  guard: { used_percent: number; reset_after_seconds: number; limit_window_seconds: number },
+  age = 0,
+) {
+  const score = normalizedScoreValue(guard, age) ?? 0;
+  const weight = guardWeightValue(main, guard, age);
+  return weight * Math.max(0, -score);
+}
+
 function stub() {
   const calls: unknown[] = [];
   const toasts: Toast[] = [];
@@ -489,6 +563,112 @@ describe("createFetch", () => {
     expect(hits[0]?.auth).toBe("Bearer pool-guard-pressure-access");
     expect(toasts[0]?.message).toContain("guard x0.200");
     expect(toasts[0]?.message).toContain("core-guard-pressure:");
+  });
+
+  test("drops pace guard when rate windows reset together", async () => {
+    store.upsert(row("core-guard-same-remain", 0, { primary: 1 }));
+    store.setPrimary("core-guard-same-remain");
+    store.cacheUsage("core-guard-same-remain", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 90,
+          reset_after_seconds: 14_400,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 10,
+          reset_after_seconds: 14_400,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+
+    expect(res.status).toBe(200);
+    expect(hits[0]?.auth).toBe("Bearer core-guard-same-remain-access");
+    expect(toasts[0]?.message).toContain("guard x1.000");
+  });
+
+  test("partially applies pace guard when the main window only slightly outlasts it", async () => {
+    store.upsert(row("core-guard-partial", 0, { primary: 1 }));
+    store.setPrimary("core-guard-partial");
+
+    const main = {
+      used_percent: 10,
+      reset_after_seconds: 14_400,
+      limit_window_seconds: 604_800,
+    };
+    const guard = {
+      used_percent: 90,
+      reset_after_seconds: 12_600,
+      limit_window_seconds: 18_000,
+    };
+    store.cacheUsage("core-guard-partial", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: guard,
+        secondary_window: main,
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response("ok", { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+    const factor = appliedGuardFactor(main, guard);
+
+    expect(res.status).toBe(200);
+    expect(hits[0]?.auth).toBe("Bearer core-guard-partial-access");
+    expect(toasts[0]?.message).toContain(`guard x${factor.toFixed(3)}`);
+  });
+
+  test("keeps the low-cap floor even when the windows reset together", async () => {
+    store.upsert(row("core-guard-floor", 0, { primary: 1 }));
+    store.setPrimary("core-guard-floor");
+
+    const main = {
+      used_percent: 10,
+      reset_after_seconds: 14_400,
+      limit_window_seconds: 604_800,
+    };
+    const guard = {
+      used_percent: 99,
+      reset_after_seconds: 14_400,
+      limit_window_seconds: 18_000,
+    };
+    store.cacheUsage("core-guard-floor", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: guard,
+        secondary_window: main,
+      },
+    });
+
+    globalThis.fetch = (async () => new Response("ok", { status: 200 })) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses");
+    const factor = appliedGuardFactor(main, guard);
+
+    expect(res.status).toBe(200);
+    expect(toasts[0]?.message).toContain(`guard x${factor.toFixed(3)}`);
+    expect(toasts[0]?.message).not.toContain("guard x1.000");
   });
 
   test("shows warming state when quota scores are not cached yet", async () => {
@@ -1828,6 +2008,95 @@ describe("createFetch", () => {
     const message = toasts[0]?.message ?? "";
     expect(message).toContain("Fast: enabled +75.600\n      (+80.600 - gate 5.000)");
     expect(message.endsWith("Fast: enabled +75.600\n      (+80.600 - gate 5.000)")).toBe(true);
+  });
+
+  test("drops fast-mode guard debt when the rate windows reset together", async () => {
+    store.upsert(row("fast-same-remain-guard", 0));
+
+    store.cacheUsage("fast-same-remain-guard", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: {
+          used_percent: 90,
+          reset_after_seconds: 14_400,
+          limit_window_seconds: 18_000,
+        },
+        secondary_window: {
+          used_percent: 10,
+          reset_after_seconds: 14_400,
+          limit_window_seconds: 604_800,
+        },
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    const message = toasts[0]?.message ?? "";
+    expect(message).not.toContain("- guard ");
+  });
+
+  test("partially applies fast-mode guard debt when the main window only slightly outlasts it", async () => {
+    store.upsert(row("fast-partial-guard", 0));
+
+    const main = {
+      used_percent: 10,
+      reset_after_seconds: 14_400,
+      limit_window_seconds: 604_800,
+    };
+    const guard = {
+      used_percent: 90,
+      reset_after_seconds: 12_600,
+      limit_window_seconds: 18_000,
+    };
+    store.cacheUsage("fast-partial-guard", {
+      plan_type: "plus",
+      rate_limit: {
+        primary_window: guard,
+        secondary_window: main,
+      },
+    });
+
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(store, async () => auth(), client);
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+    const cost = appliedGuardCost(main, guard);
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    const message = toasts[0]?.message ?? "";
+    expect(message).toContain(`- guard ${(Number(cost.toFixed(3)) * 100).toFixed(3)}`);
   });
 
   test("attributes multi-account fast-mode details to the selected account", async () => {

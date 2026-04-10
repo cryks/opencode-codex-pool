@@ -22,7 +22,7 @@ Selection toasts use compact internal plan labels to keep columns aligned: `plus
 
 **Cross-process safety.** Account state, usage cache, cooldowns, and token refresh locks live in SQLite. Multiple opencode processes share the same data without redundant API calls or race conditions.
 
-**Multi-window ranking.** When an account has multiple rate-limit windows (e.g. 5-hour and 7-day), the longest window drives the score. Shorter windows act as guardrails that can pull the score down if they're running low.
+**Multi-window ranking.** When an account has multiple rate-limit windows (e.g. 5-hour and 7-day), the longest window drives the score. Shorter windows act as guardrails, but their pace penalty is scaled by how much earlier they reset than the main window. If both windows reset together, the pace guard drops away; low-cap floors still apply.
 
 ## Requirements
 
@@ -107,7 +107,7 @@ On each request:
 
 1. **Usage fetch.** Real-time quota is pulled from each account's usage endpoint. Results are cached in SQLite for 60s and shared across processes. A background poller revalidates active accounts every 30s.
 
-2. **Scoring.** Each account's rate-limit windows are scored by remaining capacity, normalized for window size and recovery time. Highest composite score wins.
+2. **Scoring.** Each account's rate-limit windows are scored by remaining capacity, normalized for window size and recovery time. In multi-window cases, the longest window provides the base score, shorter windows contribute weighted guard pressure only when they expire meaningfully earlier, and hard low-cap floors still apply. Highest composite score wins.
 
 3. **Dispatch.** The request goes to the top-scored account (or the sticky account if affinity is active and the gap isn't big enough to justify switching). If the score clears the fast-mode threshold, the priority processing tier is enabled for this request.
 
