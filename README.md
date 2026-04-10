@@ -33,8 +33,6 @@ Selection toasts use compact internal plan labels to keep columns aligned: `plus
 ## Install
 
 ```sh
-git clone https://github.com/nicepkg/codex-pool.git
-cd codex-pool
 bun install
 bun run build
 ```
