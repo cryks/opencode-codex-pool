@@ -8,6 +8,7 @@ export type DormantTouchMode = "always" | "disabled" | "new-session-only";
 
 export interface PoolConfig {
   fastMode: FastMode;
+  fastModeBias: number;
   stickyMode: StickyMode;
   stickyStrength: number;
   dormantTouch: DormantTouchMode;
@@ -28,6 +29,7 @@ export const DEFAULT_CONFIG_PATH = join(
 
 export const DEFAULT_CONFIG: PoolConfig = {
   fastMode: "auto",
+  fastModeBias: 0,
   stickyMode: "always",
   stickyStrength: 1,
   dormantTouch: "new-session-only",
@@ -48,6 +50,13 @@ function parse(value: unknown): PoolConfig {
   if (mode !== undefined) {
     if (mode !== "auto" && mode !== "always" && mode !== "disabled") {
       throw new Error('"fast-mode" must be "auto", "always", or "disabled"');
+    }
+  }
+
+  const fastModeBias = value["fast-mode-bias"];
+  if (fastModeBias !== undefined) {
+    if (typeof fastModeBias !== "number" || !Number.isFinite(fastModeBias)) {
+      throw new Error('"fast-mode-bias" must be a finite number');
     }
   }
 
@@ -88,6 +97,7 @@ function parse(value: unknown): PoolConfig {
 
   return {
     fastMode: mode ?? DEFAULT_CONFIG.fastMode,
+    fastModeBias: fastModeBias ?? DEFAULT_CONFIG.fastModeBias,
     stickyMode: stickyMode ?? DEFAULT_CONFIG.stickyMode,
     stickyStrength: stickyStrength ?? DEFAULT_CONFIG.stickyStrength,
     dormantTouch: dormantTouch ?? DEFAULT_CONFIG.dormantTouch,
@@ -98,6 +108,7 @@ export function renderConfig(config: PoolConfig = DEFAULT_CONFIG) {
   return `${JSON.stringify(
     {
       "fast-mode": config.fastMode,
+      "fast-mode-bias": config.fastModeBias,
       "sticky-mode": config.stickyMode,
       "sticky-strength": config.stickyStrength,
       "dormant-touch": config.dormantTouch,

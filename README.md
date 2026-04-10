@@ -82,6 +82,7 @@ codex-pool reads `~/.config/opencode/codex-pool.json` on startup. Auto-created w
 ```json
 {
   "fast-mode": "auto",
+  "fast-mode-bias": 0,
   "sticky-mode": "always",
   "sticky-strength": 1,
   "dormant-touch": "new-session-only"
@@ -93,9 +94,17 @@ codex-pool reads `~/.config/opencode/codex-pool.json` on startup. Auto-created w
 | Key | Values | Default | Description |
 |---|---|---|---|
 | `fast-mode` | `"auto"` `"always"` `"disabled"` | `"auto"` | `auto` enables priority tier when quota is healthy. `always` forces it. `disabled` never adds it. |
+| `fast-mode-bias` | Number | `0` | Adjusts how eager `fast-mode: "auto"` is. Positive values make fast-mode more eager; negative values make it more conservative. |
 | `sticky-mode` | `"auto"` `"always"` `"disabled"` | `"always"` | `always` holds the session on its account for the full affinity window. `auto` allows switching when the score gap is large enough. `disabled` routes purely by score. |
 | `sticky-strength` | Number >= 0 | `1` | Multiplier for the sticky switch margin in `auto` mode. `0` disables the margin. Higher values make sessions stickier. |
 | `dormant-touch` | `"always"` `"new-session-only"` `"disabled"` | `"new-session-only"` | Controls whether untouched quota windows are promoted to start their timer. `new-session-only` only does this before a session has sticky affinity. |
+
+`fast-mode-bias` only affects `fast-mode: "auto"`.
+
+- `0` keeps the default behavior
+- `0.01` to `0.02` slightly shifts behavior
+- `0.03` to `0.05` noticeably changes behavior
+- Positive values make fast-mode more eager; negative values make it more conservative
 
 ## How it works
 

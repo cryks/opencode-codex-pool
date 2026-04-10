@@ -260,6 +260,32 @@ function normalizedScoreValue(
   return Math.log(raw / base);
 }
 
+function fastWindow(score: number, reset_after_seconds = 900, limit_window_seconds = 18_000) {
+  const value = (left: number) =>
+    normalizedScoreValue({
+      used_percent: (1 - left) * 100,
+      reset_after_seconds,
+      limit_window_seconds,
+    }) ?? Number.NEGATIVE_INFINITY;
+
+  let low = 0;
+  let high = 1;
+  for (let i = 0; i < 60; i += 1) {
+    const mid = (low + high) / 2;
+    if (value(mid) >= score) {
+      high = mid;
+      continue;
+    }
+    low = mid;
+  }
+
+  return {
+    used_percent: (1 - high) * 100,
+    reset_after_seconds,
+    limit_window_seconds,
+  };
+}
+
 function guardWeightValue(
   main: { reset_after_seconds: number },
   guard: { reset_after_seconds: number; limit_window_seconds: number },
@@ -319,6 +345,7 @@ function stub() {
 function config(over: Partial<PoolConfig> = {}): PoolConfig {
   return {
     fastMode: "auto",
+    fastModeBias: 0,
     stickyMode: "auto",
     stickyStrength: 1,
     dormantTouch: "always",
@@ -1187,6 +1214,88 @@ describe("createFetch", () => {
     expect(res.status).toBe(200);
     expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
     expect(toasts[0]?.message).toContain("Fast: disabled (config)");
+  });
+
+  test("fast-mode-bias can make auto fast-mode more eager", async () => {
+    store.upsert(row("fast-bias-up", 0));
+
+    const { client, toasts } = stub();
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: fastWindow(0.03),
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ fastModeBias: 0.03 }),
+    );
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    expect(toasts[0]?.message).toContain("gate 2.000");
+  });
+
+  test("fast-mode-bias can make auto fast-mode more conservative", async () => {
+    store.upsert(row("fast-bias-down", 0));
+
+    const { client, toasts } = stub();
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: fastWindow(0.06),
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ fastModeBias: -0.02 }),
+    );
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
+    expect(toasts[0]?.message).toContain("gate 7.000");
   });
 
   test("fails over on 429 and cools down the first account", async () => {
@@ -2451,6 +2560,69 @@ describe("createFetch", () => {
       model: "gpt-5",
       input: "hi",
       prompt_cache_key: "session-fast-band",
+      service_tier: "priority",
+    });
+    expect(toasts).toHaveLength(1);
+  });
+
+  test("fast-mode-bias shifts the sticky keep-on gate", async () => {
+    store.upsert(row("fast-band-bias", 0));
+
+    let usageHits = 0;
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        usageHits += 1;
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: usageHits === 1 ? fastWindow(0.04) : fastWindow(-0.04),
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const { client, toasts } = stub();
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ fastModeBias: 0.03 }),
+    );
+    const base = Date.now();
+    Date.now = () => base;
+
+    const request = {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: "hi",
+        prompt_cache_key: "session-fast-band-bias",
+      }),
+      headers: { "content-type": "application/json" },
+    } satisfies RequestInit;
+
+    const first = await run("https://api.openai.com/v1/responses", request);
+    expect(first.status).toBe(200);
+
+    Date.now = () => base + 60_001;
+    const second = await run("https://api.openai.com/v1/responses", request);
+    expect(second.status).toBe(200);
+    await Bun.sleep(0);
+
+    hits.length = 0;
+    const third = await run("https://api.openai.com/v1/responses", request);
+    expect(third.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      prompt_cache_key: "session-fast-band-bias",
       service_tier: "priority",
     });
     expect(toasts).toHaveLength(1);

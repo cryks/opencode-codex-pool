@@ -39,6 +39,16 @@ describe("config", () => {
     expect((await readConfig(path)).config.fastMode).toBe("disabled");
   });
 
+  test("reads the configured fast-mode-bias", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(path, JSON.stringify({ "fast-mode-bias": 0.03 }));
+    expect((await readConfig(path)).config.fastModeBias).toBe(0.03);
+  });
+
   test("reads sticky and dormant-touch config values", async () => {
     const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
     const path = join(dir, "codex-pool.json");
@@ -87,6 +97,19 @@ describe("config", () => {
 
     expect(state.config).toEqual(DEFAULT_CONFIG);
     expect(state.warning).toContain('"sticky-mode"');
+  });
+
+  test("falls back to defaults when fast-mode-bias is invalid", async () => {
+    const dir = join(tmpdir(), `codex-pool-${crypto.randomUUID()}`);
+    const path = join(dir, "codex-pool.json");
+    paths.push(dir);
+
+    mkdirSync(dir, { recursive: true });
+    await Bun.write(path, JSON.stringify({ "fast-mode-bias": "more" }));
+    const state = await readConfig(path);
+
+    expect(state.config).toEqual(DEFAULT_CONFIG);
+    expect(state.warning).toContain('"fast-mode-bias"');
   });
 
   test("falls back to defaults when sticky-strength is invalid", async () => {

@@ -548,6 +548,10 @@ function fastMargin(score: number, gate?: number) {
   return typeof gate === "number" ? score - gate : score;
 }
 
+function fastGate(base: number, bias: number) {
+  return base - bias;
+}
+
 function gateTerm(gate?: number) {
   if (typeof gate !== "number") return "";
   return ` - gate ${(Math.abs(gate) * 100).toFixed(3)}`;
@@ -1051,7 +1055,7 @@ function profile(windows: FastWindowView[], age = 0): FastProfile | null {
   } satisfies FastProfile;
 }
 
-function inspectFast(usage: Usage, previous?: boolean, age = 0): FastView {
+function inspectFast(usage: Usage, bias: number, previous?: boolean, age = 0): FastView {
   const windows = inspectFastUsage(usage);
   const rate = windows.filter((item) => item.label.startsWith("rate."));
 
@@ -1106,7 +1110,7 @@ function inspectFast(usage: Usage, previous?: boolean, age = 0): FastView {
     };
   }
 
-  const gate = previous ? FAST_SCORE_OFF : FAST_SCORE_ON;
+  const gate = fastGate(previous ? FAST_SCORE_OFF : FAST_SCORE_ON, bias);
   const fast = hit.score >= gate;
   return {
     fast,
@@ -1126,6 +1130,7 @@ function explainFast(
   parsed: JsonBody | undefined,
   usage: Usage | null,
   mode: FastMode,
+  bias: number,
   previous?: boolean,
   age = 0,
 ): FastView {
@@ -1183,7 +1188,7 @@ function explainFast(
     };
   }
 
-  return inspectFast(usage, previous, age);
+  return inspectFast(usage, bias, previous, age);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -1442,10 +1447,11 @@ function attempt(
   parsed: JsonBody | undefined,
   usage: UsageView,
   mode: FastMode,
+  bias: number,
   previous?: boolean,
 ) : AttemptResult {
   const body = usage.body ?? null;
-  const info = explainFast(input, parsed, body, mode, previous, cacheAge(usage.at));
+  const info = explainFast(input, parsed, body, mode, bias, previous, cacheAge(usage.at));
   const url = rewrite(input).toString();
   if (url !== CODEX_API_ENDPOINT) {
     return { init, fast: false, note: fastNote(info) };
@@ -1867,6 +1873,7 @@ export function createFetch(
           parsed,
           usage,
           config.fastMode,
+          config.fastModeBias,
           sticky && affinity.id === row.id ? affinity.fast : undefined,
         );
         if (!sticky || affinity.id !== row.id) {
@@ -1895,6 +1902,7 @@ export function createFetch(
             parsed,
             usage,
             config.fastMode,
+            config.fastModeBias,
             sticky && affinity.id === row.id ? affinity.fast : undefined,
           );
           res = await send(input, used.init, row);
