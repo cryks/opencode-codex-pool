@@ -554,7 +554,7 @@ function fastGate(base: number, bias: number) {
 
 function gateTerm(gate?: number) {
   if (typeof gate !== "number") return "";
-  return ` - gate ${(Math.abs(gate) * 100).toFixed(3)}`;
+  return ` ${gate >= 0 ? "-" : "+"} gate ${(Math.abs(gate) * 100).toFixed(3)}`;
 }
 
 function fastWrap(state: "enabled" | "disabled", score: string, detail?: string) {

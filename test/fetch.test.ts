@@ -55,7 +55,7 @@ function fastToast(
     const num = Number(value) * 100;
     return `${num >= 0 ? "+" : ""}${num.toFixed(3)}`;
   };
-  const gateTerm = (value: number) => ` - gate ${(Math.abs(value) * 100).toFixed(3)}`;
+  const gateTerm = (value: number) => ` ${value >= 0 ? "-" : "+"} gate ${(Math.abs(value) * 100).toFixed(3)}`;
   const wrap = (state: "enabled" | "disabled", score: string, detail?: string) =>
     detail ? `Fast: ${state} ${score}\n      (${detail})` : `Fast: ${state} ${score}`;
   const last = (line?: string) => /([+-]?\d+\.\d+)$/.exec(line ?? "")?.[1];
@@ -1256,7 +1256,7 @@ describe("createFetch", () => {
       input: "hi",
       service_tier: "priority",
     });
-    expect(toasts[0]?.message).toContain("gate 2.000");
+    expect(toasts[0]?.message).toContain("- gate 2.000");
   });
 
   test("fast-mode-bias can make auto fast-mode more conservative", async () => {
@@ -1295,7 +1295,50 @@ describe("createFetch", () => {
 
     expect(res.status).toBe(200);
     expect(body(hits[0])).toEqual({ model: "gpt-5", input: "hi" });
-    expect(toasts[0]?.message).toContain("gate 7.000");
+    expect(toasts[0]?.message).toContain("- gate 7.000");
+  });
+
+  test("fast-mode toast shows a negative gate with an explicit sign", async () => {
+    store.upsert(row("fast-bias-negative-gate", 0));
+
+    const { client, toasts } = stub();
+    const hits: Hit[] = [];
+    globalThis.fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (url(input) === CODEX_USAGE_ENDPOINT) {
+        return usage({
+          plan_type: "plus",
+          rate_limit: {
+            primary_window: fastWindow(0.03),
+          },
+        });
+      }
+
+      hits.push(await snap(input, init));
+      return new Response(await new Response(init?.body).text(), { status: 200 });
+    }) as typeof fetch;
+
+    const run = createFetch(
+      store,
+      async () => auth(),
+      client,
+      config({ fastModeBias: 0.1 }),
+    );
+    const res = await run("https://api.openai.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5", input: "hi" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(body(hits[0])).toEqual({
+      model: "gpt-5",
+      input: "hi",
+      service_tier: "priority",
+    });
+    expect(toasts[0]?.message).toContain("+ gate 5.000");
   });
 
   test("fails over on 429 and cools down the first account", async () => {
