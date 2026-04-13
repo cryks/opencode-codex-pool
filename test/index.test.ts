@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { edit } from "../src/index";
+import { edit, primaryAuth } from "../src/index";
 import { open } from "../src/store";
 import type { Store } from "../src/store";
 import type { Account } from "../src/types";
@@ -138,5 +138,39 @@ describe("edit pool accounts auth method", () => {
         duration: 10_000,
       },
     ]);
+  });
+});
+
+describe("primaryAuth", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = open(":memory:");
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  test("returns the mirrored primary oauth auth state", () => {
+    store.upsert(row("primary", 0, { primary: 1, label: "primary" }));
+    store.setPrimary("primary");
+    const item = store.get("primary");
+    if (!item) throw new Error("missing primary");
+
+    expect(primaryAuth(store)).toEqual({
+      type: "success",
+      provider: "openai",
+      refresh: "primary-refresh",
+      access: "primary-access",
+      expires: item.expires_at,
+      accountId: "primary",
+    });
+  });
+
+  test("fails when no primary account is stored", () => {
+    expect(primaryAuth(store)).toEqual({
+      type: "failed",
+    });
   });
 });

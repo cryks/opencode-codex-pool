@@ -8,11 +8,13 @@ This plugin hijacks `provider: "openai"` via `auth.loader`. The built-in Codex p
 
 Core auth.json stores `type: "oauth"` for the primary account so that `isCodex = true` in opencode's `llm.ts:65`, preserving exact Codex behavior parity (`options.instructions`, system prompt, `maxOutputTokens`).
 
+Persisted account rows are keyed by the OAuth subject (`sub`) when available. `chatgpt_account_id` is stored as request metadata only and may legitimately be shared by multiple rows when those users belong to the same ChatGPT organization/team.
+
 ### Key design decisions
 
 - JSON config lives at `~/.config/opencode/codex-pool.json`; the plugin auto-creates it with `{ "fast-mode": "auto", "fast-mode-bias": 0, "sticky-mode": "always", "sticky-strength": 1, "dormant-touch": "new-session-only" }` when missing, loads it during plugin initialization, and falls back to defaults with a warning toast if the file is invalid.
 - SQLite (`~/.local/share/opencode/codex-pool.db`) is the sole runtime source of truth for account tokens, cooldown state, shared usage cache, dormant-window touch suppression, and the cross-process locks that coordinate refresh and usage revalidation.
-- Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and are represented in auth state through the inert shadow provider.
+- Core `auth.json` is a mirror of the primary account only, kept in sync for `isCodex` activation, while additional accounts stay in SQLite and must not replace the primary `openai` auth entry with a shadow credential.
 - Auth methods expose primary login, pool-account addition, and a minimal `Edit pool accounts` manager that lists current non-primary rows and can delete a selected pool account after confirmation.
 - The built-in Codex `chat.headers` hook is not duplicated; it runs as-is.
 - 429 failover is strict priority-based (not round-robin) after request ordering has been decided.
