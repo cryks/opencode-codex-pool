@@ -68,12 +68,12 @@ export function parseJwtClaims(token: string): Claims | undefined {
 export function extractAccountId(tokens: TokenSet): string | undefined {
   if (tokens.id_token) {
     const claims = parseJwtClaims(tokens.id_token);
-    const id = claims && account(claims);
+    const id = claims?.sub || (claims && account(claims));
     if (id) return id;
   }
   if (tokens.access_token) {
     const claims = parseJwtClaims(tokens.access_token);
-    return claims ? account(claims) : undefined;
+    return claims?.sub || (claims ? account(claims) : undefined);
   }
   return undefined;
 }

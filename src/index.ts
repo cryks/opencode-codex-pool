@@ -131,6 +131,19 @@ export function edit(client: ToastClient, store = use()) {
   };
 }
 
+export function primaryAuth(store = use()) {
+  const row = store.primary();
+  if (!row) return { type: "failed" as const };
+  return {
+    type: "success" as const,
+    provider: "openai",
+    refresh: row.refresh_token,
+    access: row.access_token,
+    expires: row.expires_at,
+    accountId: row.id,
+  };
+}
+
 function save(tokens: TokenSet, priority: number, primary: boolean) {
   const store = use();
   const id = extractAccountId(tokens) || crypto.randomUUID();
@@ -191,11 +204,7 @@ function browser(label: string, primary: boolean) {
               };
             }
 
-            return {
-              type: "success" as const,
-              provider: SENTINEL_SHADOW_PROVIDER,
-              key: "shadow",
-            };
+            return primaryAuth();
           } finally {
             flow.stop();
           }
@@ -232,11 +241,7 @@ function device(label: string, primary: boolean) {
             };
           }
 
-          return {
-            type: "success" as const,
-            provider: SENTINEL_SHADOW_PROVIDER,
-            key: "shadow",
-          };
+          return primaryAuth();
         },
       };
     },
